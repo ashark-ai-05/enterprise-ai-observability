@@ -3,6 +3,7 @@ import { canonicalEventSchema } from "../src/contracts/events.js";
 import {
   deriveIdempotencyKey,
   normalizeTelemetryEvent,
+  toDecimalString,
 } from "../src/ingest/normalize.js";
 
 const rawEvent = {
@@ -39,7 +40,13 @@ describe("canonical event contract", () => {
     expect(event.schemaVersion).toBe(1);
     expect(event.timing.observedAt).toBe("2026-08-12T00:00:00.000Z");
     expect(event.idempotencyKey).toBe(
-      deriveIdempotencyKey("tenant-a", "amp", "ampcode", rawEvent.sourceEventId),
+      deriveIdempotencyKey(
+        "tenant-a",
+        "amp",
+        "ampcode",
+        rawEvent.sourceEventId,
+        event.revisionDigest,
+      ),
     );
   });
 
@@ -82,5 +89,31 @@ describe("canonical event contract", () => {
         } as never,
       }),
     ).toThrow();
+  });
+
+  it("deduplicates exact retries but assigns restated values a new key", () => {
+    const morning = normalizeTelemetryEvent(rawEvent, {
+      eventId: "00000000-0000-4000-8000-000000000001",
+    });
+    const retry = normalizeTelemetryEvent(rawEvent, {
+      eventId: "00000000-0000-4000-8000-000000000002",
+    });
+    const evening = normalizeTelemetryEvent({
+      ...rawEvent,
+      usage: {
+        ...rawEvent.usage,
+        providerReportedCost: { amount: "9.80", currency: "USD" },
+      },
+    }, { eventId: "00000000-0000-4000-8000-000000000003" });
+
+    expect(retry.idempotencyKey).toBe(morning.idempotencyKey);
+    expect(evening.revisionDigest).not.toBe(morning.revisionDigest);
+    expect(evening.idempotencyKey).not.toBe(morning.idempotencyKey);
+  });
+
+  it("normalizes provider numbers without exponential notation or float noise", () => {
+    expect(toDecimalString(1e-7, 12)).toBe("0.0000001");
+    expect(toDecimalString(0.1 + 0.2, 6)).toBe("0.3");
+    expect(toDecimalString(1e21, 6)).toBe("1000000000000000000000");
   });
 });

@@ -12,6 +12,7 @@ export const periodicUsageFactSchema = z
     schemaVersion: z.literal(EVENT_SCHEMA_VERSION),
     factId: z.string().uuid(),
     idempotencyKey: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    revisionDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
     sourceFactId: identifierSchema,
     tenantId: identifierSchema,
     source: z
@@ -28,6 +29,7 @@ export const periodicUsageFactSchema = z
         end: z.string().datetime({ offset: true }),
       })
       .strict(),
+    asOf: z.string().datetime({ offset: true }),
     principalId: identifierSchema,
     teamId: identifierSchema.optional(),
     model: z
@@ -95,5 +97,5 @@ export type PeriodicUsageFact = z.infer<typeof periodicUsageFactSchema>;
 
 export type PeriodicUsageFactInput = Omit<
   PeriodicUsageFact,
-  "schemaVersion" | "factId" | "idempotencyKey"
+  "schemaVersion" | "factId" | "idempotencyKey" | "revisionDigest"
 >;

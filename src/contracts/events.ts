@@ -53,6 +53,7 @@ export const canonicalEventSchema = z
     schemaVersion: z.literal(EVENT_SCHEMA_VERSION),
     eventId: z.string().uuid(),
     idempotencyKey: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    revisionDigest: digestSchema,
     sourceEventId: identifierSchema,
     tenantId: identifierSchema,
     source: z

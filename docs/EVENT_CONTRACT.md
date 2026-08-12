@@ -8,13 +8,31 @@ The ingestion boundary exposes two deliberately separate grains.
 
 Operational events require a run, trace, and span. They represent observable actions such as model calls, tool calls, retrieval, approvals, artifacts, and outcomes. Tenant, source/provider, source event identity, principal, event/receipt timestamps, capture policy, and producer-specific attributes are mandatory or explicitly classified.
 
-The idempotency key is deterministic over tenant, source kind, provider, and source event ID. PostgreSQL enforces uniqueness per tenant and preserves the first immutable receipt.
+`sourceEventId` is the logical provider identity. `revisionDigest` is a SHA-256 digest of the canonical semantic value, excluding generated receipt identity and receipt time. The idempotency key combines tenant, source, logical identity, and revision digest. PostgreSQL therefore deduplicates an exact retry while appending a corrected or accrued value as a new immutable observation. Readers use `ai_latest_event_receipts` (or equivalent ordering) to select the latest observation per logical identity; immutability applies to observations, not to the mutable facts they describe.
 
 ## Periodic usage facts
 
 `PeriodicUsageFactInput` is normalized by `normalizePeriodicUsageFact` into a `PeriodicUsageFact`.
 
 The first supported grain is `principal_day_model`. It is used for provider aggregates that have requests, tokens, cost, and optional output-volume metrics but no defensible run linkage. Adapters must not invent a run or trace ID to force aggregate data into the operational envelope.
+
+Periodic facts require `asOf`, recording when the provider aggregate was observed. A newer restatement for the same `sourceFactId` appends a new row; it does not update or silently lose the older observation. `ai_latest_periodic_usage_facts` exposes the current revision while the underlying receipt table retains history.
+
+## Thread-level usage
+
+Thread usage is operational and run-linked, so it uses `CanonicalEvent`, not `PeriodicUsageFact`. When the provider supplies a stable thread ID but no separate tracing hierarchy, adapters use:
+
+```text
+runId   = threadId
+traceId = threadId
+spanId  = sourceEventId for this usage observation
+```
+
+The span ID must distinguish the observation from other actions within the thread; do not set all three fields to the same value. Provider restatements retain the same logical `sourceEventId` when they describe the same fact, and the changing semantic value produces a new `revisionDigest`.
+
+## Decimal normalization
+
+Adapters convert provider JSON numbers with `toDecimalString(value, scale)`. The shared helper expands exponential notation and rounds to the selected fixed scale before trimming insignificant zeroes, ensuring adapters do not invent incompatible money conversions.
 
 ## Content boundary
 
