@@ -2,6 +2,7 @@ import {
   type LineageEvidence,
   type LineageLink,
   type LineageNode,
+  type LineageRelation,
   RESOLVER_VERSION,
   type ResolverOptions,
 } from "./types.js";
@@ -15,7 +16,7 @@ export interface ResolveRequest {
   sources: LineageNode[];
   /** Steps that may terminate one. May overlap with `sources`. */
   targets: LineageNode[];
-  relation: string;
+  relation: LineageRelation;
   options?: ResolverOptions;
 }
 
@@ -38,6 +39,7 @@ export function resolveLinks(request: ResolveRequest): LineageLink[] {
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
   const deterministicKinds = new Set(options.deterministicKinds);
   const penalizeAmbiguity = options.penalizeAmbiguity ?? true;
+  const maxLinksPerSource = options.maxLinksPerSource ?? 64;
 
   const links: LineageLink[] = [];
   const settled = new Set<string>();
@@ -81,12 +83,17 @@ export function resolveLinks(request: ResolveRequest): LineageLink[] {
       if (assessment.score >= minScore) scored.push({ target, ...assessment });
     }
     if (scored.length === 0) continue;
+    const totalCandidates = scored.length;
+    // Highest-scoring survive the cap. candidateCount keeps reporting the true total, so a
+    // consumer can detect truncation instead of seeing a tidy list that quietly dropped its tail.
+    scored.sort((left, right) => right.score - left.score);
+    const emitted = scored.slice(0, maxLinksPerSource);
 
     // Ambiguity is measured against candidates that are genuinely comparable, not every match.
     const best = Math.max(...scored.map((candidate) => candidate.score));
     const contenders = scored.filter((candidate) => near(candidate.score, best)).length;
 
-    for (const candidate of scored) {
+    for (const candidate of emitted) {
       const divisor = penalizeAmbiguity && near(candidate.score, best) ? contenders : 1;
       links.push({
         sourceStepId: source.stepId,
@@ -98,7 +105,7 @@ export function resolveLinks(request: ResolveRequest): LineageLink[] {
         // Unvalidated until measured against deterministic ground truth.
         calibration: { calibrated: false },
         evidence: candidate.evidence,
-        candidateCount: scored.length,
+        candidateCount: totalCandidates,
         resolverVersion: RESOLVER_VERSION,
       });
     }
