@@ -92,7 +92,7 @@ pnpm install
 pnpm check
 ```
 
-`pnpm check` is the full gate — it runs `pnpm typecheck` (strict, no emit), `pnpm test`, and `pnpm build`. Expect **163 tests passing across 21 files, 1 skipped**. The skip is a live-credential gateway test that only runs when real credentials are present; it is skipped by design. No network access and no database are needed — the PostgreSQL migration and ingestion tests run against in-process [PGlite](https://pglite.dev).
+`pnpm check` is the full gate — it runs `pnpm typecheck` (strict, no emit), `pnpm test`, and `pnpm build`. Expect **164 tests passing across 21 files, 1 skipped**. The skip is a live-credential gateway test that only runs when real credentials are present; it is skipped by design. No network access and no database are needed — the PostgreSQL migration and ingestion tests run against in-process [PGlite](https://pglite.dev). CI (`.github/workflows/ci.yml`) runs the same gate on every push and PR.
 
 Individual steps, if you want them separately:
 
@@ -180,19 +180,17 @@ Exercise both with the full `pnpm check`; integrate them only after choosing the
 
 Phase 0 is code-complete and reviewed, but nothing runs anywhere. In rough priority order:
 
-1. **Add CI.** There is no `.github/workflows/` in this repository. `pnpm check` is a real gate, but today it is only ever run by hand — nothing stops a pull request that breaks it from merging. This is the cheapest, highest-value next change.
+1. **Run the Amp archiver against the real workspace.** This is the only time-critical item: Amp serves per-thread cost for threads under 90 days old, so every day without an archive permanently loses thread-level cost attribution that no later work can recover. It needs one API key and somewhere to run on a schedule; it needs no endpoint installs. Start with `amp doctor` to prove the proxy/TLS path and credential before committing to a schedule.
 
-2. **Run the Amp archiver against the real workspace.** This is the only time-critical item: Amp serves per-thread cost for threads under 90 days old, so every day without an archive permanently loses thread-level cost attribution that no later work can recover. It needs one API key and somewhere to run on a schedule; it needs no endpoint installs. Start with `amp doctor` to prove the proxy/TLS path and credential before committing to a schedule.
+2. **Decide where the receipt store lives.** Migrations are proven under PGlite, but a real PostgreSQL instance, its retention and legal-hold policy, and who administers it are open. Note the operational finding from review: migration `0003` adds seven `GENERATED ... STORED` columns, which in real PostgreSQL requires a full-table rewrite under an `ACCESS EXCLUSIVE` lock — fine on an empty table, worth scheduling once `ai_event_receipts` is large.
 
-3. **Decide where the receipt store lives.** Migrations are proven under PGlite, but a real PostgreSQL instance, its retention and legal-hold policy, and who administers it are open. Note the operational finding from review: migration `0003` adds seven `GENERATED ... STORED` columns, which in real PostgreSQL requires a full-table rewrite under an `ACCESS EXCLUSIVE` lock — fine on an empty table, worth scheduling once `ai_event_receipts` is large.
+3. **Settle the Copilot `[VERIFY]` items.** Enterprise-managed OpenTelemetry export is an admin configuration action, not a code change. The open question is whether the telemetry carries **file paths** under metadata-only capture — the probabilistic attribution tier depends on it, and no amount of documentation reading will settle it for a specific tenant.
 
-4. **Settle the Copilot `[VERIFY]` items.** Enterprise-managed OpenTelemetry export is an admin configuration action, not a code change. The open question is whether the telemetry carries **file paths** under metadata-only capture — the probabilistic attribution tier depends on it, and no amount of documentation reading will settle it for a specific tenant.
+4. **Put the gateway in front of one internal endpoint.** Needs routes, a price book, a principal registry and a sink supplied for the real environment, plus a decision nobody has made yet: whether a metering proxy sits inline in the model request path, and who owns it when it is down.
 
-5. **Put the gateway in front of one internal endpoint.** Needs routes, a price book, a principal registry and a sink supplied for the real environment, plus a decision nobody has made yet: whether a metering proxy sits inline in the model request path, and who owns it when it is down.
+5. **Calibrate the resolver.** It currently ships `calibrated: false` — its confidences are priors, not measured rates. Calibration needs a population where propagated links (CI, which writes commit trailers) and inferred links (laptops, which do not) both exist for the same work. If measured precision turns out poor, that is the evidence-backed case for funding real instrumentation rather than an upfront ask.
 
-6. **Calibrate the resolver.** It currently ships `calibrated: false` — its confidences are priors, not measured rates. Calibration needs a population where propagated links (CI, which writes commit trailers) and inferred links (laptops, which do not) both exist for the same work. If measured precision turns out poor, that is the evidence-backed case for funding real instrumentation rather than an upfront ask.
-
-Items 2–6 all require decisions about a specific tenant that this repository cannot make on its own.
+Items 2–5 all require decisions about a specific tenant that this repository cannot make on its own.
 
 ## Provenance
 
