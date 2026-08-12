@@ -51,7 +51,25 @@ function scenarioFetch(scenario: Scenario): { fetch: typeof fetch; usageRequests
       return respond(200, { threadID: id, subThreadIDs: [], usage: 1, models: [] });
     }
 
-    if (url.includes("/api/v2/threads")) return respond(200, { threads: scenario.threads });
+    if (url.includes("/api/v2/threads")) {
+      // The real API honours `after`/`before` (on firstSyncedAt) and `sort`. An earlier stub
+      // ignored them, which masked a bug where run 2 saw no already-known threads at all.
+      const query = new URL(url).searchParams;
+      const after = query.get("after");
+      const before = query.get("before");
+      let rows = scenario.threads.filter((thread) => {
+        const synced = thread.firstSyncedAt;
+        if (after && (!synced || synced <= after)) return false;
+        if (before && (!synced || synced >= before)) return false;
+        return true;
+      });
+      rows = [...rows].sort((a, b) => {
+        const left = a.firstSyncedAt ?? a.createdAt ?? "";
+        const right = b.firstSyncedAt ?? b.createdAt ?? "";
+        return query.get("sort") === "DESC" ? right.localeCompare(left) : left.localeCompare(right);
+      });
+      return respond(200, { threads: rows });
+    }
 
     return respond(404, { error: "unrouted" });
   }) as unknown as typeof fetch;
@@ -158,8 +176,20 @@ describe("AmpArchiver", () => {
 
   it("skips a settled thread on the next run but keeps polling an active one", async () => {
     scenario.threads = [
-      { id: "T-quiet", creatorUserID: "u", createdAt: daysAgo(10), updatedAt: daysAgo(5) },
-      { id: "T-active", creatorUserID: "u", createdAt: daysAgo(10), updatedAt: NOW.toISOString() },
+      {
+        id: "T-quiet",
+        creatorUserID: "u",
+        createdAt: daysAgo(10),
+        firstSyncedAt: daysAgo(10),
+        updatedAt: daysAgo(5),
+      },
+      {
+        id: "T-active",
+        creatorUserID: "u",
+        createdAt: daysAgo(10),
+        firstSyncedAt: daysAgo(10),
+        updatedAt: NOW.toISOString(),
+      },
     ];
     const { archiver, usageRequests } = await harness(scenario);
 
@@ -171,9 +201,67 @@ describe("AmpArchiver", () => {
     expect(usageRequests).toEqual(["T-active"]);
   });
 
+  it("re-polls a known active thread on the next run even once a sync cursor exists", async () => {
+    // Regression (found in review by Codex): discovery used `after=lastFirstSyncedAt` as the only
+    // candidate source. Because the real API filters on firstSyncedAt, an already-known active
+    // thread vanished from run 2 and its cost was frozen at whatever run 1 captured.
+    scenario.threads = [
+      {
+        id: "T-longrunner",
+        creatorUserID: "u",
+        createdAt: daysAgo(10),
+        firstSyncedAt: daysAgo(10),
+        updatedAt: NOW.toISOString(),
+      },
+    ];
+    const { archiver, checkpoints, usageRequests } = await harness(scenario);
+
+    await archiver.run();
+    expect((await checkpoints.read()).lastFirstSyncedAt).toBe(daysAgo(10));
+
+    usageRequests.length = 0;
+    await archiver.run();
+
+    expect(usageRequests).toEqual(["T-longrunner"]);
+  });
+
+  it("sweeps all history once, then bounds every later run to the live window", async () => {
+    scenario.threads = [
+      {
+        id: "T-new",
+        creatorUserID: "u",
+        createdAt: daysAgo(1),
+        firstSyncedAt: daysAgo(1),
+        updatedAt: NOW.toISOString(),
+      },
+      { id: "T-past", creatorUserID: "u", createdAt: daysAgo(400), firstSyncedAt: daysAgo(400) },
+    ];
+    const { archiver, checkpoints, usageRequests } = await harness(scenario);
+
+    // Run 1 is unbounded so the cold-start gap can be inventoried: T-past is seen and recorded
+    // as expired, without a usage request being wasted on it.
+    const first = await archiver.run();
+    expect(first.threadsSeen).toBe(2);
+    expect(first.usageExpired).toBe(1);
+    expect(usageRequests).toEqual(["T-new"]);
+    expect((await checkpoints.read()).coldStartSweepAt).toBeDefined();
+
+    // Run 2 anchors `after` to the cliff boundary, so the long-expired thread is not re-listed.
+    usageRequests.length = 0;
+    const second = await archiver.run();
+    expect(second.threadsSeen).toBe(1);
+    expect(usageRequests).toEqual(["T-new"]);
+  });
+
   it("dedupes identical bodies while still logging every observation", async () => {
     scenario.threads = [
-      { id: "T-1", creatorUserID: "u", createdAt: daysAgo(1), updatedAt: NOW.toISOString() },
+      {
+        id: "T-1",
+        creatorUserID: "u",
+        createdAt: daysAgo(1),
+        firstSyncedAt: daysAgo(1),
+        updatedAt: NOW.toISOString(),
+      },
     ];
     const { archiver, root } = await harness(scenario);
 
@@ -188,6 +276,35 @@ describe("AmpArchiver", () => {
       .map((line) => JSON.parse(line) as { stage: string; threadId?: string })
       .filter((entry) => entry.stage === "thread-usage" && entry.threadId === "T-1");
     expect(captures).toHaveLength(2);
+  });
+
+  it("re-sweeps unfiltered after the sweep interval so threads without a sync time resurface", async () => {
+    // Bounded listing relies on `firstSyncedAt`, which the schema does not guarantee. The weekly
+    // sweep caps how long such a thread can stay invisible; without it the gap is unbounded.
+    scenario.threads = [{ id: "T-nosync", creatorUserID: "u", createdAt: daysAgo(3) }];
+    const root = await mkdtemp(join(tmpdir(), "amp-archive-"));
+    const routed = scenarioFetch(scenario);
+    const checkpoints = new FileCheckpointStore(join(root, "checkpoint.json"));
+    let clock = NOW;
+    const archiver = new AmpArchiver({
+      client: new AmpClient({ apiKey: "k", fetch: routed.fetch, sleep: async () => {} }),
+      store: new FileRawStore(root),
+      checkpoints,
+      now: () => clock,
+    });
+
+    await archiver.run();
+    routed.usageRequests.length = 0;
+
+    // A day later the bounded listing filters it out entirely.
+    clock = new Date(NOW.getTime() + 86_400_000);
+    await archiver.run();
+    expect(routed.usageRequests).toEqual([]);
+
+    // Past the sweep interval the unfiltered walk picks it up again.
+    clock = new Date(NOW.getTime() + 8 * 86_400_000);
+    await archiver.run();
+    expect(routed.usageRequests).toEqual(["T-nosync"]);
   });
 
   it("advances the daily-usage backfill checkpoint across runs", async () => {

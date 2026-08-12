@@ -67,10 +67,15 @@ export class FileRawStore implements RawStore {
 
 export interface CheckpointState {
   /**
-   * Highest `firstSyncedAt` seen. Used as the `after` filter for discovering new threads.
-   * Not sufficient on its own to catch activity on older threads — see ThreadArchiver.
+   * Highest `firstSyncedAt` seen, for reporting only.
+   *
+   * Deliberately NOT used as a request cursor: `after` filters on initial sync time, so
+   * advancing it would hide already-known active threads and freeze their cost. The archiver
+   * anchors `after` to the 90-day cliff boundary instead.
    */
   lastFirstSyncedAt?: string;
+  /** When the one-time unbounded sweep ran. Until set, listing is unfiltered. */
+  coldStartSweepAt?: string;
   /** Thread IDs whose usage is captured and final (thread inactive, or past the cliff). */
   settledThreadIds?: string[];
   /** Thread IDs confirmed past the 90-day usage window; never re-request these. */
