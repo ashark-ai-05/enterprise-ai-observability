@@ -58,6 +58,10 @@ describe("periodic usage facts", () => {
     };
     const morning = normalizePeriodicUsageFact(base);
     const retry = normalizePeriodicUsageFact(base);
+    const unchangedLater = normalizePeriodicUsageFact({
+      ...base,
+      asOf: "2026-08-12T06:00:00Z",
+    });
     const evening = normalizePeriodicUsageFact({
       ...base,
       asOf: "2026-08-12T12:00:00Z",
@@ -68,6 +72,7 @@ describe("periodic usage facts", () => {
     });
 
     expect(retry.idempotencyKey).toBe(morning.idempotencyKey);
+    expect(unchangedLater.idempotencyKey).toBe(morning.idempotencyKey);
     expect(evening.idempotencyKey).not.toBe(morning.idempotencyKey);
   });
 });
