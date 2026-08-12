@@ -30,14 +30,15 @@ function rawPayloadRef(artifact: RawArtifact): { ref: string; digest: string } {
  *
  * One fact per (date × user × model).
  *
- * **Line counts are reported per user/day, not per model.** Copying them onto every model fact
- * would multiply a user's code output by however many models they used that day — the same
- * double-counting class of bug as fetching sub-thread cost alongside its parent. They are
- * therefore attached to exactly one fact per (user, day): the highest-cost model, ties broken by
- * model name. `SUM(output.linesAdded)` across facts then equals the true daily total.
+ * **Per-user/day metrics are deliberately dropped, not redistributed.** Amp reports
+ * `linesAdded`/`linesDeleted`/`linesModified` and a user-day cost total per *user per day*, with
+ * no model dimension. Copying them onto every model fact multiplies them; assigning them to one
+ * chosen model keeps sums right but invents a model association that a `GROUP BY model` would
+ * report as fact. Both produce confidently wrong numbers, so neither is emitted here. The values
+ * remain in the raw archive and can be surfaced by a real `principal_day` grain later.
  *
- * This is a workaround for a grain the contract does not yet have. A `principal_day` grain would
- * model it properly; until then this keeps the numbers summable rather than inflated.
+ * User email is likewise omitted: `principalId` identifies the subject, and email in a hot
+ * attribute record is PII the metadata-only policy does not need.
  */
 export function toPeriodicUsageFacts(
   response: AmpDailyUsageResponse,
@@ -53,8 +54,6 @@ export function toPeriodicUsageFacts(
     for (const entry of day.users) {
       const models = Object.entries(entry.models);
       if (models.length === 0) continue;
-
-      const lineCarrier = pickLineCountCarrier(models);
 
       for (const [modelName, metrics] of models) {
         const fact: PeriodicUsageFactInput = {
@@ -88,21 +87,11 @@ export function toPeriodicUsageFacts(
             namespace: VENDOR_NAMESPACE,
             attributes: {
               // Amp reports a totalTokens the contract has no field for; keep it rather than drop it.
+              // Strictly per-model, so it carries no false attribution.
               totalTokens: metrics.totalTokens,
-              userDayUsageUsd: toDecimalString(entry.metrics.usage),
-              ...(entry.user.email === undefined ? {} : { userEmail: entry.user.email }),
             },
             rawPayload: rawPayloadRef(artifact),
           },
-          ...(modelName === lineCarrier
-            ? {
-                output: {
-                  linesAdded: entry.metrics.linesAdded,
-                  linesDeleted: entry.metrics.linesDeleted,
-                  linesModified: entry.metrics.linesModified,
-                },
-              }
-            : {}),
         };
         facts.push(fact);
       }
@@ -110,16 +99,6 @@ export function toPeriodicUsageFacts(
   }
 
   return facts;
-}
-
-/** Highest cost wins; ties broken by model name so the choice is stable across runs. */
-function pickLineCountCarrier(models: Array<[string, { usage: number }]>): string {
-  let best = models[0] as [string, { usage: number }];
-  for (const candidate of models.slice(1)) {
-    if (candidate[1].usage > best[1].usage) best = candidate;
-    else if (candidate[1].usage === best[1].usage && candidate[0] < best[0]) best = candidate;
-  }
-  return best[0];
 }
 
 /**

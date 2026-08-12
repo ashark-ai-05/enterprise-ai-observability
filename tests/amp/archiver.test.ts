@@ -253,6 +253,89 @@ describe("AmpArchiver", () => {
     expect(usageRequests).toEqual(["T-new"]);
   });
 
+  it("re-opens a settled thread that later resumes activity", async () => {
+    // Regression (review finding from Codex on PR #2): settlement stored bare thread IDs, so a
+    // quiet thread that resumed was skipped forever and its cost froze at the pre-resumption value.
+    const thread = {
+      id: "T-resumer",
+      creatorUserID: "u",
+      createdAt: daysAgo(20),
+      firstSyncedAt: daysAgo(20),
+      updatedAt: daysAgo(5),
+    };
+    scenario.threads = [thread];
+    const root = await mkdtemp(join(tmpdir(), "amp-archive-"));
+    const routed = scenarioFetch(scenario);
+    let clock = NOW;
+    const archiver = new AmpArchiver({
+      client: new AmpClient({ apiKey: "k", fetch: routed.fetch, sleep: async () => {} }),
+      store: new FileRawStore(root),
+      checkpoints: new FileCheckpointStore(join(root, "checkpoint.json")),
+      now: () => clock,
+    });
+
+    await archiver.run(); // captured, and quiet long enough to settle
+    routed.usageRequests.length = 0;
+
+    await archiver.run(); // still quiet -> correctly skipped
+    expect(routed.usageRequests).toEqual([]);
+
+    // The thread resumes: newer updatedAt must void settlement.
+    thread.updatedAt = new Date(NOW.getTime() + 3_600_000).toISOString();
+    clock = new Date(NOW.getTime() + 7_200_000);
+    const resumed = await archiver.run();
+
+    expect(routed.usageRequests).toEqual(["T-resumer"]);
+    expect(resumed.settlementsReopened).toBe(1);
+  });
+
+  it("rejects a non-positive backfill chunk instead of looping forever", () => {
+    // A negative lookback moves the backfill cursor forward, so the bound is never reached and
+    // the API is called indefinitely. Guarded in the constructor, not only at the CLI.
+    const build = (chunk: number) =>
+      new AmpArchiver({
+        client: new AmpClient({ apiKey: "k", fetch: scenarioFetch(scenario).fetch }),
+        store: new FileRawStore("/tmp/unused"),
+        checkpoints: new FileCheckpointStore("/tmp/unused/checkpoint.json"),
+        backfillChunkDays: chunk,
+      });
+
+    expect(() => build(-1)).toThrow(RangeError);
+    expect(() => build(0)).toThrow(RangeError);
+    expect(() => build(400)).toThrow(RangeError);
+    expect(() => build(30)).not.toThrow();
+  });
+
+  it("persists the backfill checkpoint after each chunk, not only at run end", async () => {
+    // A handled fetch error still lets run() finish and write once, so counting writes is the
+    // only assertion that distinguishes per-chunk persistence. It matters for a hard kill
+    // mid-backfill: without it, an interrupted run restarts the year-long walk from today.
+    const root = await mkdtemp(join(tmpdir(), "amp-archive-"));
+    const inner = new FileCheckpointStore(join(root, "checkpoint.json"));
+    let writes = 0;
+    const counting = {
+      read: () => inner.read(),
+      write: async (state: Awaited<ReturnType<typeof inner.read>>) => {
+        writes += 1;
+        await inner.write(state);
+      },
+    } as unknown as FileCheckpointStore;
+
+    const archiver = new AmpArchiver({
+      client: new AmpClient({ apiKey: "k", fetch: scenarioFetch(scenario).fetch, sleep: async () => {} }),
+      store: new FileRawStore(root),
+      checkpoints: counting,
+      now: () => NOW,
+      backfillChunkDays: 30,
+    });
+    await archiver.run();
+
+    // 365 days in 30-day chunks is 13 backfill writes, plus the end-of-run write.
+    expect(writes).toBeGreaterThan(10);
+    const reached = new Date((await inner.read()).dailyUsageBackfilledFrom as string);
+    expect(Math.round((NOW.getTime() - reached.getTime()) / 86_400_000)).toBeGreaterThanOrEqual(365);
+  });
+
   it("dedupes identical bodies while still logging every observation", async () => {
     scenario.threads = [
       {

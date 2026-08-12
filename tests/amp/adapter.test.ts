@@ -13,6 +13,8 @@ const artifact = (overrides: Partial<RawArtifact> = {}): RawArtifact => ({
   fetchedAt: "2026-08-12T10:00:00.000Z",
   contentHash: "a".repeat(64),
   body: {},
+  bodyText: "{}",
+  redactedFields: [],
   ...overrides,
 });
 
@@ -68,31 +70,26 @@ describe("toPeriodicUsageFacts", () => {
     ]);
   });
 
-  it("attaches per-user/day line counts to exactly one model fact", () => {
-    // Amp reports lines per user per day. Copying them onto every model fact would multiply a
-    // user's code output by the number of models they used — the double-counting failure again.
+  it("omits per-user/day metrics rather than attributing them to a model", () => {
+    // Amp reports lines and a user-day cost per USER per DAY, with no model dimension.
+    // Copying them onto each model fact multiplies them; putting them on one chosen model keeps
+    // sums right but invents a model association a GROUP BY would report as fact. Neither is
+    // emitted (review finding from Codex on PR #2).
     const facts = toPeriodicUsageFacts(
       dailyResponse({ "claude-opus-5": model(4.2), "gpt-5": model(3.3), "haiku-4-5": model(0.1) }),
       artifact(),
       CONTEXT,
     );
 
-    const withOutput = facts.filter((f) => f.output !== undefined);
-    expect(withOutput).toHaveLength(1);
-    expect(withOutput[0]?.model.name).toBe("claude-opus-5"); // highest cost carries them
-    // Summing across facts reproduces the true daily total rather than 3x it.
-    const totalAdded = facts.reduce((sum, f) => sum + (f.output?.linesAdded ?? 0), 0);
-    expect(totalAdded).toBe(120);
+    expect(facts).toHaveLength(3);
+    expect(facts.every((f) => f.output === undefined)).toBe(true);
+    expect(facts.every((f) => f.vendor.attributes.userDayUsageUsd === undefined)).toBe(true);
   });
 
-  it("breaks carrier ties by model name so the choice is stable across runs", () => {
-    const facts = toPeriodicUsageFacts(
-      dailyResponse({ zeta: model(2), alpha: model(2) }),
-      artifact(),
-      CONTEXT,
-    );
+  it("never places user email in hot attributes", () => {
+    const facts = toPeriodicUsageFacts(dailyResponse({ m: model(1) }), artifact(), CONTEXT);
 
-    expect(facts.find((f) => f.output !== undefined)?.model.name).toBe("alpha");
+    expect(JSON.stringify(facts)).not.toContain("dev@example.com");
   });
 
   it("converts float cost through the shared decimal helper", () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { redactResponse } from "./redact.js";
 import type {
   AmpDailyUsageResponse,
   AmpThreadListResponse,
@@ -23,6 +24,11 @@ export interface AmpClientOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Page size for thread listing, 1–100. Default 100. */
   pageSize?: number;
+  /**
+   * Persist sensitive fields (thread titles, user emails) unredacted.
+   * Only for an approved, separately protected store — never the default filesystem archive.
+   */
+  allowSensitive?: boolean;
 }
 
 /** A response the caller asked for that the API says does not exist. Not an error condition. */
@@ -67,6 +73,7 @@ export class AmpClient {
   private readonly backoffBaseMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   readonly pageSize: number;
+  private readonly allowSensitive: boolean;
 
   constructor(options: AmpClientOptions) {
     this.baseUrl = (options.baseUrl ?? "https://ampcode.com").replace(/\/+$/, "");
@@ -76,6 +83,7 @@ export class AmpClient {
     this.backoffBaseMs = options.backoffBaseMs ?? 500;
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.pageSize = Math.min(Math.max(options.pageSize ?? 100, 1), 100);
+    this.allowSensitive = options.allowSensitive ?? false;
   }
 
   /**
@@ -102,16 +110,22 @@ export class AmpClient {
       const text = await response.text();
 
       if (response.ok) {
+        const parsed = JSON.parse(text) as unknown;
+        // Redact first, then serialize, then hash: the digest must identify the stored bytes.
+        const { body, removed } = redactResponse(endpoint, parsed, this.allowSensitive);
+        const bodyText = removed.length > 0 ? JSON.stringify(body) : text;
         return {
-          data: JSON.parse(text) as T,
+          data: body as T,
           artifact: {
             key,
             endpoint,
             params,
             httpStatus: response.status,
             fetchedAt: new Date().toISOString(),
-            contentHash: hashBody(text),
-            body: JSON.parse(text),
+            contentHash: hashBody(bodyText),
+            body,
+            bodyText,
+            redactedFields: removed,
           },
         };
       }

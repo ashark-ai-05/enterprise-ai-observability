@@ -1,3 +1,5 @@
+export { FlagError, parseFlags } from "./flags.js";
+export type { Flags } from "./flags.js";
 export { toPeriodicUsageFacts, toThreadUsageEvents } from "./adapter.js";
 export type { AdapterContext } from "./adapter.js";
 export { AmpClient, AmpNotAvailableError, AmpRequestError, hashBody } from "./client.js";
@@ -6,10 +8,12 @@ export {
   AmpArchiver,
   DAILY_USAGE_MAX_LOOKBACK_DAYS,
   DEFAULT_POLL_POLICY,
+  MAX_SETTLE_HOURS,
   THREAD_USAGE_WINDOW_DAYS,
 } from "./archiver.js";
 export type { ArchiveRunSummary, ArchiverOptions, ThreadPollPolicy } from "./archiver.js";
 export { FileCheckpointStore, FileRawStore } from "./store.js";
+export { redactResponse } from "./redact.js";
 export type { CheckpointState, PutResult, RawStore } from "./store.js";
 export type {
   AmpDailyUsageResponse,
