@@ -241,14 +241,16 @@ export class AmpArchiver {
         const result = await this.store.put(artifact);
         this.countPut(result.stored, summary, artifact);
         candidates.push(thread);
-        if (artifact.redactedFields.length > 0 || this.allowSensitive) {
-          await this.store.observe({
-            stage: "thread-list",
-            contentHash: artifact.contentHash,
-            fetchedAt: artifact.fetchedAt,
-            ...this.captureProvenance(artifact),
-          });
-        }
+        // Unconditional: every fetch must leave a receipt. Emitting only when something was
+        // redacted meant an ordinary metadata-only page stored a blob no receipt accounted for,
+        // so the archive could not answer "where did this blob come from?" for the common case.
+        await this.store.observe({
+          stage: "thread-list",
+          contentHash: artifact.contentHash,
+          fetchedAt: artifact.fetchedAt,
+          deduped: !result.stored,
+          ...this.captureProvenance(artifact),
+        });
         const synced = thread.firstSyncedAt;
         if (synced && (!state.lastFirstSyncedAt || synced > state.lastFirstSyncedAt)) {
           // Reporting high-water mark only — deliberately not used as a request cursor.
