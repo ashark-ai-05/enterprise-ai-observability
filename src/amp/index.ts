@@ -1,3 +1,5 @@
+export { toPeriodicUsageFacts, toThreadUsageEvents } from "./adapter.js";
+export type { AdapterContext } from "./adapter.js";
 export { AmpClient, AmpNotAvailableError, AmpRequestError, hashBody } from "./client.js";
 export type { AmpClientOptions, Fetched } from "./client.js";
 export {
