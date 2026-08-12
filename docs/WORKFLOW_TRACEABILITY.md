@@ -13,6 +13,9 @@ inception → attempt(s) → cross-layer activity/evidence → artifact → veri
 step IDs are unique, links resolve, the graph is acyclic, every non-inception step reaches inception,
 a verification reaches an artifact, and a successful outcome reaches both artifact and verification.
 This rejects activity-only traces, untested commits, disconnected artifacts, and ungrounded reports.
+`complete: true` certifies structural completeness of the supplied graph; it does not make an
+evidence-resolved link factually true. Consumers must still use each link's method, confidence,
+calibration, ambiguity, and coverage when deciding how strongly to attribute an outcome.
 
 ## Portable correlation
 
@@ -114,6 +117,11 @@ Migration `0003_workflow_lineage` projects workflow, attempt, step, stage, layer
 append-only JSON receipt into generated query columns. Existing producers remain valid because the
 envelope is optional. `ai_workflow_trace_events` exposes latest restatements; tenant/workflow and
 tenant/workflow/attempt indexes support reconstruction.
+
+Adding stored generated columns rewrites an existing PostgreSQL table under an `ACCESS EXCLUSIVE`
+lock. Apply this migration before high-volume production ingestion or in an approved maintenance
+window. For a large established receipt table, stage nullable ordinary columns plus an online
+backfill/projection change instead of applying `0003` directly.
 
 Monitor:
 
