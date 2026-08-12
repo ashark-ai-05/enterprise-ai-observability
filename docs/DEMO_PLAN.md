@@ -4,14 +4,15 @@ Combines `enterprise-intelligence-layer` (EIL — federated search over Confluen
 with this repo's canonical events, workflow reconstruction, and lineage resolver, into one
 end-to-end scenario over a synthetic enterprise. Written up per Codex's and Opus's analysis in
 the Welcome channel thread on 2026-08-12; this document is the spec to build against, not a
-restatement of that discussion. Updated 2026-08-12 as the plan itself moved past its first draft
-— corpus and bridge status below reflect current PR state, not the original proposal.
+restatement of that discussion. Last brought current 2026-08-12 ~21:00 UTC, after a day of corpus
+and evaluation work stalled mid-sequence — see Status below before trusting anything past that.
 
-**Verdict: build it, but not as originally scoped.** Two of the four "already exists" claims
-were artifacts, not measurements (verified below), and the piece both agents independently
-called load-bearing — EIL emitting canonical events — is real work, not integration glue. The
-corpus work is done twice over (fixed, found to need fixing again, fixed properly) and the event
-bridge is built; what's actually blocking the demo now is a ranking decision, not a corpus one.
+**Verdict, current: not ready to demo, and not close.** The event bridge is built and merged.
+The corpus/evaluation work below is not a ranking-tuning question anymore — it surfaced two
+confirmed, real product capability gaps (exact identifier lookup does not exist; the system
+cannot abstain from an unanswerable query) and retracted the day's single biggest retrieval
+finding (graph's claimed scale advantage) as a measurement artifact. Nothing about retrieval
+quality is defensible yet. Four EIL PRs (#50, #51, #52, #53) are open and draft; none merged.
 
 ## Scenario
 
@@ -57,19 +58,59 @@ is what actually happened, in order:
 
 5. **Fixed properly in [PR #50](https://github.com/ashark-ai-05/enterprise-intelligence-layer/pull/50)** (draft):
    subjects now scale with corpus size (31 at `ci`, 500 at `stress`, constant ~10 docs/subject),
-   links are drawn from same-subject documents with mutual cross-references (real near-miss
-   distractors), giving the first numbers worth quoting: recall@10 0.983 (ci) → 0.533 (stress),
-   MRR 0.755 → 0.493. **The scale cliff survives an honest corpus** — smaller than the artifact
-   numbers suggested, but real.
-   - Draft, not ready to merge: it also revealed graph expansion actively *hurts* MRR on a
-     realistic corpus (0.843 → 0.755) by outranking lexical hits it used to be the only route to
-     — two tests now correctly fail rather than being silently re-baselined. That's a ranking
-     decision (fusion weighting), not a corpus one, open in the Welcome channel thread.
-   - Held-out links and decoys (originally item 3 in this doc's first draft) are not yet in
-     PR #50; still open.
+   links are drawn from same-subject documents with mutual cross-references. Also revealed graph
+   expansion actively *hurting* MRR on a realistic corpus by outranking lexical hits it used to be
+   the only route to — two tests now correctly fail rather than being silently re-baselined.
 
-None of this blocks the event bridge below, which does not depend on retrieval quality — but no
-demo should quote a recall/MRR number until PR #50's ranking question resolves.
+6. **The obvious fixes (scalar weight tuning, a "graph-only can't displace" partition invariant,
+   BM25 lexical scoring) were each tried and each measurement-disproved in turn** — [PR #51](https://github.com/ashark-ai-05/enterprise-intelligence-layer/pull/51),
+   [PR #52](https://github.com/ashark-ai-05/enterprise-intelligence-layer/pull/52). BM25 made
+   retrieval *substantially worse* (stress MRR fell 71%) for a real, findable reason: the query
+   benchmark itself mixed three different intents — exact ID lookup, subject search, and graph
+   navigation — into one flat relevance judgment, so no single scorer or fusion policy could
+   satisfy all three at once. Retained as negative-result records, not merged.
+
+7. **The benchmark itself was rebuilt around that finding — [PR #53](https://github.com/ashark-ai-05/enterprise-intelligence-layer/pull/53)** (draft, still evolving as of the last
+   update): split into query families with truth derived independently for each — `exact_lookup`,
+   `subject_search`, `relationship_navigation`, `unanswerable`, `denied` (generated) plus a
+   planned `cross_source_investigation` (hand-authored, not yet built — a synthetic generator
+   cannot produce non-circular truth for "requires multiple independently relevant sources"
+   without encoding the answer at generation time).
+   - **Building it surfaced six separate fixture-validity defects**, five found by cross-review
+     across three agents reading the actual diff rather than the summary — every one produced
+     numbers that looked entirely plausible. Recurring pattern: a truth-selection function forgot
+     the ACL filter (found independently in two different functions), or truth was silently
+     selected by the same code that builds the thing being measured (circular by construction).
+   - **Confirmed, current findings, all independently re-verified, not merely asserted:**
+     - `exact_lookup` recall = **0.000 at both scales.** Not degraded — the capability does not
+       exist. `classify()` extracts a `literal` for issue keys/paths/symbols; nothing in the
+       product consumes it. Compounding cause: chunk indexing pulls from body/section/comment
+       text only, never `title` — so an issue key like `PAY-47` is often structurally absent from
+       the searchable index regardless of scorer or tokenizer.
+     - Retrieval-level abstention is **absent** — the retriever returns candidates for 100% of
+       constructed-unanswerable queries. (Precisely scoped: this measures the retriever, not an
+       agent — no generation/verification layer sits in front of it here.)
+     - ACL leakage is **zero**, measured (not assumed) across all families, including
+       relationship-navigation cases that carry a protected neighbour in the graph.
+     - Anchor-based navigation (given a known object, reach its authorized neighbours) **works
+       perfectly** — 1.000 coverage, zero leakage, at both scales — when tested directly against
+       the link store. It scored as broken (0.475/0.450, graph on/off identical) when routed
+       through ordinary text search, because the anchor can't be found by search in the first
+       place (same root cause as exact_lookup). **The real gap is a missing product surface**: no
+       MCP tool or CLI verb exposes "given this object, show related evidence" today.
+     - **Retracted:** the day's headline retrieval finding — graph expansion giving +53% mean MRR
+       at enterprise scale — did not survive independent truth. It was measured when subject
+       truth was the exact object trio the link-planning function itself selected; against truth
+       assigned independently of that function, graph is neutral to slightly negative at scale.
+       No scale-vs-corpus-size product decision should be made from that number; it no longer
+       exists as a finding.
+   - **Not yet done, work stalled here as of the last update:** the old-scorer vs. BM25 × graph
+     on/off measurement matrix, run per family on the repaired benchmark. This is the one
+     remaining step before any ranking conclusion is defensible. Nobody has picked it back up.
+
+None of this blocks the event bridge below, which does not depend on retrieval quality. But no
+demo should quote *any* retrieval number, and the "agent follows related evidence" beat in the
+scenario above cannot be built until the missing navigation surface exists.
 
 ## The event bridge
 
@@ -132,32 +173,36 @@ to reuse today (only occurrence in EIL is an *exclusion* regex skipping binaries
 2-3 real PDFs and a citation-by-page-number check — rather than skip it silently or fake full
 coverage.
 
-## Sequencing — updated
+## Sequencing — current
 
-1. ~~EIL corpus honesty fixes~~ — done (#48), then found to need a second, deeper fix (#50,
-   draft) that surfaced the ranking regression below.
-2. ~~Event bridge~~ — done: `eil` source kind + regression test here, emitter in
-   [EIL PR #49](https://github.com/ashark-ai-05/enterprise-intelligence-layer/pull/49).
-3. ~~CI~~ — done: EIL already had it (found late — see PR history), observability's landed in
-   [#11](https://github.com/ashark-ai-05/enterprise-ai-observability/pull/11) and merged.
-4. **Open, blocking:** the graph-expansion ranking regression PR #50 surfaced. EIL's own
-   `src/retrieval/classify.ts` already documents the general principle — graph expansion should
-   be weighted below direct-match arms everywhere, because RRF consumes rank and an unweighted
-   expansion arm lets a corroborating neighbour outrank a real text match — and discounts it to
-   `0.3` for `path`/`identifier`-shaped queries. The `natural-language` branch, which is what this
-   corpus's synthetic queries classify as, weights `graph-expand` at `1` — full parity with
-   lexical, no discount — which is the likely direct cause of PR #50's regression and a candidate
-   one-line experiment before reaching for a larger fusion redesign. Ranking decision, not a
-   corpus one — being resolved in the Welcome thread.
-5. **Demo launcher** tying both repos into one command + timeline/dashboard output (Codex's
-   scope) — depends on (4) resolving, since it determines what recall/MRR numbers the demo can
-   honestly show.
+1. ~~Event bridge~~ — done: `eil` source kind + regression test here, emitter in
+   [EIL PR #49](https://github.com/ashark-ai-05/enterprise-intelligence-layer/pull/49), merged
+   both sides.
+2. ~~CI~~ — done: EIL already had it, observability's landed in
+   [#11](https://github.com/ashark-ai-05/enterprise-ai-observability/pull/11), merged.
+3. ~~Corpus honesty~~ / ~~ranking hypotheses~~ — superseded. The weight-tuning idea this section
+   used to point to was one of three ranking hypotheses (weight/partition/BM25) all disproved by
+   measurement; the actual defect was the benchmark, not the ranker. See item 7 above.
+4. **Open, stalled:** finish PR #53 (query-family benchmark) — run the old-scorer/BM25 × graph
+   on/off matrix per family, land it, then decide what (if anything) still needs a ranking fix
+   once the benchmark can no longer produce a circular answer.
+5. **Open, unscoped:** the missing navigation surface (an MCP tool / CLI verb for anchor-based
+   "related evidence"), and a plan for the confirmed-absent exact-lookup capability. Both are now
+   real product gaps, not measurement noise — need scoping before the demo's "agent follows
+   related evidence" beat is buildable.
+6. **Demo launcher** tying both repos into one command + timeline/dashboard output (Codex's
+   scope) — blocked on (4) and (5), not started.
+7. **Two items only the repo owner can move, open since ~12:00 UTC:** which corpus scale the
+   product is optimized for (the retraction in item 7 above removes the evidence that made this
+   urgent, but the question itself is still unanswered), and explicit approval for one real,
+   paid Amp CLI session (the only Phase 0 proof still gated on spend rather than evidence).
 
 ## Division of labor — as it actually landed
 
-- **Sonnet:** contract-side event bridge + regression test (this PR), observability CI (#11,
-  merged), EIL-side emitter (#49).
-- **Opus:** corpus honesty fixes (#48, merged; #50, draft — surfaced the ranking regression),
-  Amp attribution/squash-policy investigation.
+- **Sonnet:** contract-side event bridge + regression test, observability CI (#11, merged),
+  EIL-side emitter (#49, merged), cross-repo review on PR #53's fixtures across ~7 rounds.
+- **Opus:** corpus honesty fixes (#48, merged), the query-family benchmark rebuild (#50–#53,
+  all draft), BM25 experiment (#52, negative result), Amp attribution/squash-policy investigation.
 - **Codex:** narrative, execution architecture (record/replay, Amp+Copilot as first-class
-  runners), launcher — not yet started pending (4).
+  runners), review direction on the family-split work — launcher not started, blocked on
+  retrieval questions resolving first.
