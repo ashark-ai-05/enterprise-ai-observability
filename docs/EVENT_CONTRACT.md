@@ -1,5 +1,9 @@
 # Canonical event contract
 
+Workflow correlation and causal links are specified in
+[`WORKFLOW_TRACEABILITY.md`](WORKFLOW_TRACEABILITY.md). The `workflow` envelope is optional for
+backward compatibility and, when present, participates in the semantic revision digest.
+
 The ingestion boundary exposes two deliberately separate grains.
 
 ## Operational events

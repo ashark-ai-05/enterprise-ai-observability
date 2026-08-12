@@ -96,4 +96,42 @@ ORDER BY tenant_id, source_kind, source_provider, source_fact_id,
          as_of DESC, ingested_at DESC;
 `,
   },
+  {
+    id: "0003_workflow_lineage",
+    sql: `
+ALTER TABLE ai_event_receipts
+  ADD COLUMN IF NOT EXISTS workflow_id text
+    GENERATED ALWAYS AS (event #>> '{workflow,workflowId}') STORED,
+  ADD COLUMN IF NOT EXISTS workflow_type text
+    GENERATED ALWAYS AS (event #>> '{workflow,workflowType}') STORED,
+  ADD COLUMN IF NOT EXISTS attempt_id text
+    GENERATED ALWAYS AS (event #>> '{workflow,attemptId}') STORED,
+  ADD COLUMN IF NOT EXISTS workflow_step_id text
+    GENERATED ALWAYS AS (event #>> '{workflow,stepId}') STORED,
+  ADD COLUMN IF NOT EXISTS workflow_stage text
+    GENERATED ALWAYS AS (event #>> '{workflow,stage}') STORED,
+  ADD COLUMN IF NOT EXISTS workflow_layer text
+    GENERATED ALWAYS AS (event #>> '{workflow,layer}') STORED,
+  ADD COLUMN IF NOT EXISTS workflow_role text
+    GENERATED ALWAYS AS (event #>> '{workflow,role}') STORED;
+
+CREATE INDEX IF NOT EXISTS ai_event_receipts_tenant_workflow_idx
+  ON ai_event_receipts (tenant_id, workflow_id, observed_at, workflow_step_id)
+  WHERE workflow_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ai_event_receipts_tenant_workflow_attempt_idx
+  ON ai_event_receipts (tenant_id, workflow_id, attempt_id, observed_at)
+  WHERE workflow_id IS NOT NULL;
+
+CREATE OR REPLACE VIEW ai_latest_event_receipts AS
+SELECT DISTINCT ON (tenant_id, source_kind, source_provider, source_event_id) *
+FROM ai_event_receipts
+ORDER BY tenant_id, source_kind, source_provider, source_event_id,
+         observed_at DESC, received_at DESC, ingested_at DESC;
+
+CREATE OR REPLACE VIEW ai_workflow_trace_events AS
+SELECT *
+FROM ai_latest_event_receipts
+WHERE workflow_id IS NOT NULL;
+`,
+  },
 ] as const;
