@@ -73,6 +73,7 @@ export function normalizeTelemetryEvent(
     source: raw.source,
     identity: raw.identity,
     trace: raw.trace,
+    ...(raw.workflow === undefined ? {} : { workflow: raw.workflow }),
     observedAt: toIsoTimestamp(raw.observedAt),
     operation: raw.operation,
     status: raw.status ?? "unknown",
@@ -99,6 +100,7 @@ export function normalizeTelemetryEvent(
     source: raw.source,
     identity: raw.identity,
     trace: raw.trace,
+    ...(raw.workflow === undefined ? {} : { workflow: raw.workflow }),
     timing: {
       observedAt: toIsoTimestamp(raw.observedAt),
       receivedAt: toIsoTimestamp(raw.receivedAt ?? options.receivedAt ?? new Date()),

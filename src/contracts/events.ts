@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workflowContextSchema } from "./workflow.js";
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -79,6 +80,7 @@ export const canonicalEventSchema = z
         parentSpanId: identifierSchema.optional(),
       })
       .strict(),
+    workflow: workflowContextSchema.optional(),
     timing: z
       .object({
         observedAt: isoTimestampSchema,
@@ -173,6 +175,7 @@ export interface RawTelemetryEvent {
   source: CanonicalEvent["source"];
   identity: CanonicalEvent["identity"];
   trace: CanonicalEvent["trace"];
+  workflow?: CanonicalEvent["workflow"];
   observedAt: string | Date;
   receivedAt?: string | Date;
   operation: Operation;
