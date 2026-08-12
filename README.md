@@ -1,6 +1,6 @@
 # Enterprise AI Observability
 
-**Design artefacts for observing, attributing and evaluating AI coding agents in an enterprise. Design only — no implementation.**
+**Design and a working Phase 0 implementation for observing, attributing and evaluating AI coding agents in an enterprise.**
 
 How much is AI coding assistance costing, and what is it actually producing? Most answers today stop at token counts. This design goes after the harder question: tracing a dollar spent on a prompt through to a merged pull request, a shipped feature, or a resolved incident — and doing it inside enterprise constraints, behind a corporate proxy, without installing arbitrary software.
 
@@ -55,18 +55,43 @@ The parts most likely to be contested, stated plainly so a reviewer can push bac
 
 ## Status
 
-The first implementation slice is in development: canonical event and periodic-usage contracts plus append-only PostgreSQL ingestion. No collectors have been configured or deployed, and no enterprise data has been collected. Several assumptions are marked **[VERIFY]** in the documents and depend on facts about a specific tenant that documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths** under metadata-only capture, which the probabilistic attribution tier depends on.
+Phase 0 is implemented and merged to `main` (currently `319b791`). No collectors have been configured or deployed against real infrastructure, and no enterprise data or credentials have been collected or used. Several design assumptions are marked **[VERIFY]** in the docs and depend on facts about a specific tenant that documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths** under metadata-only capture, which the probabilistic attribution tier depends on.
+
+Merged components (all five PRs, `main` at `319b791`, 163 tests passed / 1 skipped by design):
+
+| Component | Source | PR |
+|---|---|---|
+| Canonical event + usage contracts, PostgreSQL ingestion | `src/contracts`, `src/storage` | [#1](../../pull/1) |
+| Secure MaaS metering gateway (auth, meter, forward) | `src/gateway` | [#3](../../pull/3) |
+| Amp thread/aggregate archiver | `src/amp` | [#2](../../pull/2) |
+| Generic workflow traceability + two executable proof flows | `src/workflow` | [#5](../../pull/5) |
+| Calibrated cross-boundary lineage resolver | `src/lineage` | [#4](../../pull/4) |
+
+**A note on branches:** the head branches for these PRs (`codex/workflow-lineage`, `feat/amp-archiver`, `feat/lineage-resolver`, `sonnet/maas-metering-gateway`) still show up in `git branch -a` / the GitHub branch list — GitHub doesn't auto-delete them after merge here. Each one is fully merged; verify with `gh pr list --state all` (all five show `MERGED`) rather than `git branch --merged`, since some PRs were integrated via rebase, which changes commit SHAs and makes a plain ancestry check show "unmerged" for branches that are, in fact, merged. They're safe to delete.
 
 ## Development
-
-The first implementation slice defines the shared provider-neutral event contract, periodic usage-fact contract, and PostgreSQL receipt schema. See [Canonical event contract](docs/EVENT_CONTRACT.md).
 
 ```bash
 pnpm install
 pnpm check
 ```
 
-`pnpm check` runs strict TypeScript validation, the full Vitest suite (including PGlite migration coverage), and the production build.
+`pnpm check` runs strict TypeScript validation (`pnpm typecheck`), the full Vitest suite including PGlite migration coverage (`pnpm test`), and the production build (`pnpm build`). All three can also be run individually.
+
+### CLI
+
+The Amp archiver ships as a CLI (`bin: aiobs`, built to `dist/cli.js`):
+
+```bash
+pnpm build
+AMP_API_KEY=<workspace key> node dist/cli.js amp doctor            # single-call reachability check
+AMP_API_KEY=<workspace key> node dist/cli.js amp archive            # backfill + walk threads oldest-first
+AMP_API_KEY=<workspace key> node dist/cli.js amp archive --root ./archive --settle-hours 24 --chunk-days 30
+```
+
+Without `AMP_API_KEY` set, both commands refuse to run (exit code 3) rather than silently archiving nothing. `AMP_BASE_URL` overrides the API base (default `https://ampcode.com`) for testing against a different endpoint.
+
+The gateway (`src/gateway`), lineage resolver (`src/lineage`), and workflow reconstruction (`src/workflow`) are library modules, not standalone services yet — `createGatewayServer` in `src/gateway/server.ts` wraps `handleGatewayRequest` in a plain `node:http` server for embedding. See `tests/gateway/server.test.ts`, `tests/lineage/resolver.test.ts`, and `tests/workflow-proof.test.ts` for working usage examples until a dedicated entry point / demo script lands.
 
 ## Provenance
 
