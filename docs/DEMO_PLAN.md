@@ -82,7 +82,7 @@ needs four call sites, one canonical event each, all using `operation: "retrieva
 | EIL call site | `workflow.stage` | notes |
 |---|---|---|
 | Per-connector ingestion (Confluence/Jira/git/PDF fetch) | `ingest` | one event per source object, `sourceEventId` = connector's native ID |
-| Per query, index stage | `search` | `vendor.attributes.query`, ranked result IDs |
+| Per query, index stage | `search` | `vendor.attributes.query_digest` (not raw query text — see below), ranked result IDs |
 | Per chunk returned to a caller | `evidence` | this is the link target the lineage resolver's `used_evidence` relation attaches to |
 | Per MCP tool call | `mcp` | `layer: "mcp"`, ties the retrieval back into the same `workflowId`/`attemptId` as the acting agent |
 
@@ -91,6 +91,16 @@ default (no latency tax on normal search), writing NDJSON to a local sink for de
 and POSTing to this repo's gateway when a real endpoint is configured. This repo already exports
 `normalizeTelemetryEvent` and `canonicalEventSchema` for that purpose — no new contract package
 needed, just an EIL-side dependency and four emit calls.
+
+**Redaction discipline, found during review of the reference test (PR #10):** `metadata_only` is
+only checked for internal agreement — `capture.mode` vs `capture.contentIncluded` — nothing
+inspects `vendor.attributes`, and `ai_event_receipts` is append-only, so anything placed there is
+permanent. Amp stays clean by producer convention (`src/amp/redact.ts`); a new producer inherits
+no guardrail. EIL's queries are user-authored free text, which makes this sharper than for any
+existing producer. The emitter must carry `query_digest` (sha256, same format as the contract's
+other digests), never raw query text, in every `search`-stage event. Whether `metadata_only`
+should be *enforced* rather than declared — e.g. an attribute-key allowlist per namespace — is a
+separate, contract-level decision, tracked outside this doc.
 
 ## PDF
 
