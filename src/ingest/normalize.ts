@@ -125,7 +125,6 @@ export function normalizePeriodicUsageFact(
     source: raw.source,
     grain: raw.grain,
     period: raw.period,
-    asOf: raw.asOf,
     principalId: raw.principalId,
     ...(raw.teamId === undefined ? {} : { teamId: raw.teamId }),
     model: raw.model,

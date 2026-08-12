@@ -16,7 +16,7 @@ Operational events require a run, trace, and span. They represent observable act
 
 The first supported grain is `principal_day_model`. It is used for provider aggregates that have requests, tokens, cost, and optional output-volume metrics but no defensible run linkage. Adapters must not invent a run or trace ID to force aggregate data into the operational envelope.
 
-Periodic facts require `asOf`, recording when the provider aggregate was observed. A newer restatement for the same `sourceFactId` appends a new row; it does not update or silently lose the older observation. `ai_latest_periodic_usage_facts` exposes the current revision while the underlying receipt table retains history.
+Periodic facts require `asOf`, recording when the provider aggregate was observed. `asOf` is intentionally excluded from `revisionDigest`: polling the same value later deduplicates instead of making polling frequency drive fact-table growth. A changed aggregate produces a new digest and appends with its new `asOf`; unchanged-poll freshness remains in the collector's raw observation log. `ai_latest_periodic_usage_facts` exposes the current value while the underlying receipt table retains changed revisions.
 
 ## Thread-level usage
 
