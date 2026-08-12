@@ -390,6 +390,26 @@ describe("AmpArchiver", () => {
     expect(routed.usageRequests).toEqual(["T-nosync"]);
   });
 
+  it("writes a thread-list receipt even when nothing was redacted", async () => {
+    // Review finding from Codex on PR #2: the receipt was conditional on redaction, so an
+    // ordinary metadata-only page stored a blob that no observation accounted for.
+    scenario.threads = [
+      { id: "T-plain", creatorUserID: "u", createdAt: daysAgo(1), firstSyncedAt: daysAgo(1) },
+    ];
+    const { archiver, root } = await harness(scenario);
+
+    await archiver.run();
+
+    const receipts = (await readFile(join(root, "observations.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((r) => r.stage === "thread-list");
+
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ capturePolicy: "metadata_only", redactedFields: [] });
+  });
+
   it("stamps capture policy and redacted fields on every receipt", async () => {
     // A run-level count answers "did we redact anything"; an auditor needs it per stored record.
     scenario.threads = [
