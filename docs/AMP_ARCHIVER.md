@@ -33,10 +33,22 @@ possible defect in a cost system. Sub-thread metadata is still archived; only th
 thread as expired and never asks again, rather than retrying or counting it as an error. Genuine
 failures (5xx, exhausted retries) land in `atRiskThreadIds` instead, which is the list to act on.
 
-**Discovery cursor ≠ activity cursor.** The list endpoint's `after`/`before` filter on
-`firstSyncedAt` — *initial sync time*, not last update. A thread first synced months ago but active
-today will not match `after=<last run>`. So `after` is used only to discover threads new to the
-workspace; activity on known threads is judged from `updatedAt` on the returned rows.
+**The list cursor is the cliff boundary, not a high-water mark.** `after`/`before` filter on
+`firstSyncedAt` — *initial sync time*, not last update. Advancing `after` to the newest thread seen
+therefore hides every already-known thread on the next run, freezing an active thread's cost at
+whatever the first run happened to capture. (Caught in review by Codex; the original test stub
+ignored `after`, so no test could have failed.)
+
+`after` is anchored to `now - 90d` instead. That returns exactly the threads whose usage is still
+retrievable — bounded work, and known-but-active threads reappear every run. This matters because
+**there is no single-thread GET on this API** (`/threads/{id}` supports only `DELETE`), so
+re-listing is the only way to refresh a thread's `updatedAt`.
+
+**A periodic unfiltered sweep backs that up.** Bounded listing assumes every thread carries
+`firstSyncedAt`, which the schema does not guarantee — only `id` and `creatorUserID` are required —
+and how the live API treats such rows under `after` is unverified. The first run sweeps unfiltered
+(which is also what inventories the cold-start gap), and `FULL_SWEEP_INTERVAL_DAYS` re-sweeps
+weekly, capping how long any thread can stay invisible at seven days.
 
 **Raw bodies, never transformed.** Responses are stored verbatim, content-addressed by SHA-256.
 Normalization happens downstream and may be re-run against a changed contract; that is only safe if
@@ -97,10 +109,11 @@ re-walk rather than wedging the archiver, and every write is idempotent so resta
 
 ## Status
 
-Fixture-driven. 25 tests cover retry/backoff, `Retry-After`, cliff ordering, sub-thread exclusion,
-404-as-expiry, settle/re-poll behaviour, dedupe, and checkpoint recovery. Verified end-to-end
-against a stub server: a second run fetched zero bodies and skipped two settled threads, and the
-backfill checkpoint reached exactly 365 days.
+Fixture-driven. 28 tests cover retry/backoff, `Retry-After`, cliff ordering, sub-thread exclusion,
+404-as-expiry, settle/re-poll behaviour, cursor-boundary re-polling, sweep interval, dedupe, and
+checkpoint recovery. Verified end-to-end against a stub server that honours `after`: run 1 sweeps
+unfiltered and records the past-cliff thread without spending a request; run 2 bounds to the live
+window, re-polls the active thread and skips the settled one.
 
 **Not yet run against a live Amp workspace** — no credentials in the build environment. First real
 run should be `aiobs amp doctor`, then a single `archive` with `--chunk-days 30`, then check

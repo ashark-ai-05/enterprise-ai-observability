@@ -6,6 +6,15 @@ import type { AmpThreadSummary } from "./types.js";
 export const THREAD_USAGE_WINDOW_DAYS = 90;
 /** Documented by Amp: `lookbackDays` on the daily-usage rollup is capped at 365. */
 export const DAILY_USAGE_MAX_LOOKBACK_DAYS = 365;
+/**
+ * How often to re-run an unfiltered thread sweep.
+ *
+ * Bounded listing anchors `after` to the cliff boundary, which relies on every thread carrying
+ * `firstSyncedAt`. The schema only guarantees `id` and `creatorUserID`, and how the live API
+ * treats rows without a sync time under `after` is unverified. A periodic full sweep costs one
+ * extra walk a week and caps the blast radius of that unknown at seven days.
+ */
+export const FULL_SWEEP_INTERVAL_DAYS = 7;
 
 export interface ArchiveRunSummary {
   threadsSeen: number;
@@ -179,10 +188,26 @@ export class AmpArchiver {
 
     const candidates: AmpThreadSummary[] = [];
     try {
-      // `after` filters on firstSyncedAt, so it finds threads new to the workspace. Threads
-      // already known but newly active are picked up from the checkpoint sets below, not here.
+      /**
+       * The list cursor is the cliff boundary, NOT a high-water mark.
+       *
+       * `after` filters on `firstSyncedAt`, so advancing it to the newest thread seen would
+       * hide every already-known thread on the next run — freezing an active thread's cost at
+       * whatever the first run happened to capture. (Found in review by Codex; the original
+       * test stub ignored `after` and so could not catch it.)
+       *
+       * Anchoring `after` to `now - 90d` instead returns exactly the threads whose usage is
+       * still retrievable: bounded work, and known-but-active threads reappear every run.
+       * There is no single-thread GET on this API, so re-listing is the only way to refresh
+       * a thread's `updatedAt`.
+       */
       const listOptions: Parameters<AmpClient["iterateThreads"]>[0] = { sort: "ASC" };
-      if (state.lastFirstSyncedAt) listOptions.after = state.lastFirstSyncedAt;
+      const sweepDue = this.isFullSweepDue(state, now);
+      if (!sweepDue) {
+        listOptions.after = new Date(
+          now.getTime() - THREAD_USAGE_WINDOW_DAYS * 86_400_000,
+        ).toISOString();
+      }
 
       for await (const { thread, artifact } of this.client.iterateThreads(listOptions)) {
         summary.threadsSeen += 1;
@@ -191,9 +216,14 @@ export class AmpArchiver {
         candidates.push(thread);
         const synced = thread.firstSyncedAt;
         if (synced && (!state.lastFirstSyncedAt || synced > state.lastFirstSyncedAt)) {
+          // Reporting high-water mark only — deliberately not used as a request cursor.
           state.lastFirstSyncedAt = synced;
         }
       }
+      // Records when the last unfiltered sweep completed. The first one inventories threads
+      // already past the cliff so the cold-start gap can be measured; later ones are the
+      // safety net described on FULL_SWEEP_INTERVAL_DAYS.
+      if (sweepDue) state.coldStartSweepAt = now.toISOString();
     } catch (error) {
       // Keep whatever was listed; a partial page still yields usable usage fetches.
       summary.errors.push({ stage: "list-threads", message: describe(error) });
@@ -278,6 +308,14 @@ export class AmpArchiver {
 
     state.settledThreadIds = [...settled];
     state.expiredThreadIds = [...expired];
+  }
+
+  /** True on the very first run, and once per FULL_SWEEP_INTERVAL_DAYS thereafter. */
+  private isFullSweepDue(state: CheckpointState, now: Date): boolean {
+    if (!state.coldStartSweepAt) return true;
+    const last = new Date(state.coldStartSweepAt).getTime();
+    if (Number.isNaN(last)) return true;
+    return now.getTime() - last >= FULL_SWEEP_INTERVAL_DAYS * 86_400_000;
   }
 
   /** Cost stops changing once a thread goes quiet; until then any captured total is partial. */
