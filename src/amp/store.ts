@@ -1,7 +1,19 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RawArtifact } from "./types.js";
+
+/** Canonical lowercase SHA-256 hex. Anything else is rejected before touching the filesystem. */
+const CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/;
+
+/** Raised when an artifact's declared hash is malformed or does not describe its bytes. */
+export class InvalidArtifactError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidArtifactError";
+  }
+}
 
 export interface PutResult {
   /** False when an identical body was already stored (same contentHash). */
@@ -37,7 +49,17 @@ export interface RawStore {
 export class FileRawStore implements RawStore {
   constructor(private readonly root: string) {}
 
+  /**
+   * `contentHash` becomes a path segment, so it is validated as canonical SHA-256 hex before use.
+   * Without this, a hash like `../../etc/x` writes outside the archive root entirely — the
+   * two-character shard prefix becomes `..`.
+   */
   private blobPath(contentHash: string): string {
+    if (!CONTENT_HASH_PATTERN.test(contentHash)) {
+      throw new InvalidArtifactError(
+        `contentHash must be 64 lowercase hex characters, received ${JSON.stringify(contentHash.slice(0, 80))}`,
+      );
+    }
     return join("blobs", contentHash.slice(0, 2), `${contentHash}.json`);
   }
 
@@ -47,6 +69,14 @@ export class FileRawStore implements RawStore {
 
   async put(artifact: RawArtifact): Promise<PutResult> {
     const relative = this.blobPath(artifact.contentHash);
+    // The hash is the integrity receipt downstream consumers verify against. Trusting a caller's
+    // word for it would let a mislabelled blob pass verification later, so recompute here.
+    const actual = createHash("sha256").update(artifact.bodyText, "utf8").digest("hex");
+    if (actual !== artifact.contentHash) {
+      throw new InvalidArtifactError(
+        `contentHash does not describe bodyText (declared ${artifact.contentHash}, actual ${actual})`,
+      );
+    }
     const absolute = join(this.root, relative);
     if (existsSync(absolute)) {
       return { stored: false, path: relative };

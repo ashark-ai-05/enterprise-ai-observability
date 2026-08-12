@@ -24,6 +24,8 @@ export interface AmpClientOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Page size for thread listing, 1–100. Default 100. */
   pageSize?: number;
+  /** Maximum bytes accepted from a single response. Default 64 MiB. */
+  maxResponseBytes?: number;
   /**
    * Persist sensitive fields (thread titles, user emails) unredacted.
    * Only for an approved, separately protected store — never the default filesystem archive.
@@ -39,6 +41,17 @@ export class AmpNotAvailableError extends Error {
   ) {
     super(`Amp resource not available: ${endpoint} (${detail})`);
     this.name = "AmpNotAvailableError";
+  }
+}
+
+/** Response exceeded the configured byte cap. Not retried — a retry would fetch the same body. */
+export class AmpResponseTooLargeError extends Error {
+  constructor(
+    readonly endpoint: string,
+    readonly limit: number,
+  ) {
+    super(`Amp response exceeded ${limit} bytes: ${endpoint}`);
+    this.name = "AmpResponseTooLargeError";
   }
 }
 
@@ -74,6 +87,7 @@ export class AmpClient {
   private readonly sleep: (ms: number) => Promise<void>;
   readonly pageSize: number;
   private readonly allowSensitive: boolean;
+  private readonly maxResponseBytes: number;
 
   constructor(options: AmpClientOptions) {
     this.baseUrl = (options.baseUrl ?? "https://ampcode.com").replace(/\/+$/, "");
@@ -84,6 +98,11 @@ export class AmpClient {
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.pageSize = Math.min(Math.max(options.pageSize ?? 100, 1), 100);
     this.allowSensitive = options.allowSensitive ?? false;
+    const maxBytes = options.maxResponseBytes ?? 64 * 1024 * 1024;
+    if (!Number.isInteger(maxBytes) || maxBytes <= 0) {
+      throw new RangeError(`maxResponseBytes must be a positive integer, received ${maxBytes}`);
+    }
+    this.maxResponseBytes = maxBytes;
   }
 
   /**
@@ -107,7 +126,7 @@ export class AmpClient {
           accept: "application/json",
         },
       });
-      const text = await response.text();
+      const text = await this.readCapped(response, endpoint);
 
       if (response.ok) {
         const parsed = JSON.parse(text) as unknown;
@@ -149,6 +168,51 @@ export class AmpClient {
       endpoint,
       `exhausted ${this.maxAttempts} attempts: ${lastRetryable}`,
     );
+  }
+
+  /**
+   * Reads a response body under a hard byte cap.
+   *
+   * `response.text()` buffers without limit, so a hostile or malfunctioning endpoint could
+   * exhaust memory. A declared `Content-Length` is rejected up front; otherwise the stream is
+   * consumed incrementally and cancelled the moment the running total crosses the cap, because
+   * chunked responses can lie about or omit their length.
+   */
+  private async readCapped(response: Response, endpoint: string): Promise<string> {
+    const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+    if (Number.isFinite(declared) && declared > this.maxResponseBytes) {
+      throw new AmpResponseTooLargeError(endpoint, this.maxResponseBytes);
+    }
+
+    const stream = response.body;
+    if (!stream || typeof stream.getReader !== "function") {
+      // Test doubles and older runtimes expose only text(); still enforce the cap after the fact.
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > this.maxResponseBytes) {
+        throw new AmpResponseTooLargeError(endpoint, this.maxResponseBytes);
+      }
+      return text;
+    }
+
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        total += value.byteLength;
+        if (total > this.maxResponseBytes) {
+          await reader.cancel();
+          throw new AmpResponseTooLargeError(endpoint, this.maxResponseBytes);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks).toString("utf8");
   }
 
   /** Exponential backoff with full jitter; `Retry-After` (seconds) wins when the server sends it. */

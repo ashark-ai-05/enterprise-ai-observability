@@ -42,6 +42,7 @@ function buildArchiver(flags: Flags): AmpArchiver {
     store: new FileRawStore(flags.root),
     checkpoints: new FileCheckpointStore(join(flags.root, "checkpoint.json")),
   };
+  if (flags.allowSensitive) options.allowSensitive = true;
   if (flags.settleHours !== undefined && Number.isFinite(flags.settleHours)) {
     options.policy = { settleAfterHours: flags.settleHours };
   }

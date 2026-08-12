@@ -390,6 +390,28 @@ describe("AmpArchiver", () => {
     expect(routed.usageRequests).toEqual(["T-nosync"]);
   });
 
+  it("stamps capture policy and redacted fields on every receipt", async () => {
+    // A run-level count answers "did we redact anything"; an auditor needs it per stored record.
+    scenario.threads = [
+      { id: "T-1", creatorUserID: "u", createdAt: daysAgo(1), firstSyncedAt: daysAgo(1), updatedAt: daysAgo(1) },
+    ];
+    const { archiver, root } = await harness(scenario);
+
+    await archiver.run();
+
+    const receipts = (await readFile(join(root, "observations.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((r) => r.stage === "thread-usage" || r.stage === "daily-usage");
+
+    expect(receipts.length).toBeGreaterThan(0);
+    for (const receipt of receipts) {
+      expect(receipt.capturePolicy).toBe("metadata_only");
+      expect(Array.isArray(receipt.redactedFields)).toBe(true);
+    }
+  });
+
   it("advances the daily-usage backfill checkpoint across runs", async () => {
     const { archiver, checkpoints } = await harness(scenario);
 
