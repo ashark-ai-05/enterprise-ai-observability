@@ -17,6 +17,11 @@ import type { GatewayEventSink } from "./sink.js";
 /** Bumped whenever capture policy changes; stamped onto every emitted event. */
 const CAPTURE_POLICY_VERSION = "2026-08-12.metadata-only";
 
+const AUDIT_FAILURE_RESPONSE: GatewayResponse = {
+  status: 503,
+  body: JSON.stringify({ error: "audit persistence failed" }),
+};
+
 export interface GatewayDeps {
   readonly routes: readonly ProviderRoute[];
   readonly principals: PrincipalRegistry;
@@ -49,6 +54,12 @@ export interface GatewayResponse {
  * that only logs successes cannot answer "what fraction of AI traffic do we
  * have context for," which is the coverage metric the design docs call out
  * as the shadow-AI detector.
+ *
+ * Fail-closed on audit persistence: if the event sink can't record a call,
+ * this returns 503 regardless of what the upstream call actually did. An
+ * observability gateway that returns a normal response while silently
+ * failing to record it has defeated its own purpose — better an honest
+ * error than an uncounted success.
  */
 export async function handleGatewayRequest(
   deps: GatewayDeps,
@@ -66,7 +77,7 @@ export async function handleGatewayRequest(
       request.headers.authorization,
     );
   } catch (error) {
-    await emit(deps, {
+    const persisted = await emit(deps, {
       now,
       newId,
       observedAt,
@@ -88,12 +99,13 @@ export async function handleGatewayRequest(
           error instanceof UnauthorizedError ? "unauthorized" : "auth_error",
       },
     });
+    if (!persisted) return AUDIT_FAILURE_RESPONSE;
     return { status: 401, body: JSON.stringify({ error: "unauthorized" }) };
   }
 
   const route = resolveRoute(deps.routes, request.provider);
   if (!route) {
-    await emit(deps, {
+    const persisted = await emit(deps, {
       now,
       newId,
       observedAt,
@@ -106,6 +118,7 @@ export async function handleGatewayRequest(
       usage: undefined,
       attributes: { "http.status_code": 404, error_class: "unknown_provider" },
     });
+    if (!persisted) return AUDIT_FAILURE_RESPONSE;
     return { status: 404, body: JSON.stringify({ error: "unknown provider" }) };
   }
 
@@ -122,7 +135,7 @@ export async function handleGatewayRequest(
       ? priceUsage(deps.priceBook, request.provider, modelName, usage)
       : undefined;
 
-  await emit(deps, {
+  const persisted = await emit(deps, {
     now,
     newId,
     observedAt,
@@ -148,6 +161,7 @@ export async function handleGatewayRequest(
         : {}),
     },
   });
+  if (!persisted) return AUDIT_FAILURE_RESPONSE;
 
   return { status: result.status, body: result.bodyText };
 }
@@ -184,8 +198,14 @@ interface EmitInput {
  * `normalizeTelemetryEvent()` (PR #1) rather than constructing a
  * `CanonicalEvent` by hand — `eventId`, `idempotencyKey`, and
  * `revisionDigest` are the normalizer's job, not this gateway's.
+ *
+ * Returns whether persistence succeeded rather than throwing: the caller
+ * decides the fail-closed response, and there is no event to emit about a
+ * failure to emit (that risks looping if the sink itself is what's down),
+ * so a sink failure is logged to stderr as the one exception to "log
+ * everything as an event."
  */
-async function emit(deps: GatewayDeps, input: EmitInput): Promise<void> {
+async function emit(deps: GatewayDeps, input: EmitInput): Promise<boolean> {
   const raw: RawTelemetryEvent = {
     sourceEventId: input.newId(),
     tenantId: input.tenantId,
@@ -218,10 +238,19 @@ async function emit(deps: GatewayDeps, input: EmitInput): Promise<void> {
   // ids, but the canonical schema requires eventId to be a real UUID, and
   // normalizeTelemetryEvent's own default (randomUUID()) already satisfies
   // that without coupling this module to UUID generation.
-  const event = normalizeTelemetryEvent(raw, {
-    receivedAt: input.now(),
-  });
-  await deps.sink.emit(event);
+  //
+  // normalizeTelemetryEvent() itself throws on schema validation failure,
+  // so it must be inside this try too, not just the sink write — otherwise
+  // a normalization failure propagates out of handleGatewayRequest uncaught
+  // instead of degrading to the fail-closed response below.
+  try {
+    const event = normalizeTelemetryEvent(raw, { receivedAt: input.now() });
+    await deps.sink.emit(event);
+    return true;
+  } catch (error) {
+    console.error("gateway: failed to persist audit event", error);
+    return false;
+  }
 }
 
 function readTrace(

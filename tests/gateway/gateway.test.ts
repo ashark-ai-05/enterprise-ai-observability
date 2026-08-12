@@ -1,5 +1,6 @@
 import { type Server, createServer } from "node:http";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GatewayEventSink } from "../../src/gateway/sink.js";
 import { InMemoryEventSink } from "../../src/gateway/sink.js";
 import {
   type GatewayDeps,
@@ -8,6 +9,12 @@ import {
 import type { PriceBook } from "../../src/gateway/pricebook.js";
 import { StaticPrincipalRegistry } from "../../src/gateway/principals.js";
 import type { ProviderRoute } from "../../src/gateway/routes.js";
+
+class RejectingEventSink implements GatewayEventSink {
+  async emit(): Promise<void> {
+    throw new Error("sink unavailable");
+  }
+}
 
 const priceBook: PriceBook = {
   version: "test-v1",
@@ -170,7 +177,7 @@ describe("handleGatewayRequest", () => {
     expect(response.status).toBe(400);
     expect(sink.events[0]!.operation).toBe("policy");
     expect(sink.events[0]!.attributes.error_class).toBe(
-      "path_escapes_route_origin",
+      "path_escapes_route_scope",
     );
   });
 
@@ -211,5 +218,39 @@ describe("handleGatewayRequest", () => {
         modelessServer.close(() => resolve()),
       );
     }
+  });
+
+  describe("fail-closed audit persistence", () => {
+    it("returns 503 instead of the successful upstream response when the sink rejects", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const deps = { ...buildDeps(new InMemoryEventSink()), sink: new RejectingEventSink() };
+      const response = await handleGatewayRequest(deps, {
+        provider: "internal-maas",
+        path: "/v1/chat",
+        method: "POST",
+        headers: { authorization: "Bearer good-key" },
+        body: JSON.stringify({ model: "gpt-x" }),
+      });
+      // The upstream call genuinely succeeded (the fixture server always
+      // returns 200) — this must not surface as success anyway, because
+      // there is now no record that it happened.
+      expect(response.status).toBe(503);
+      expect(JSON.parse(response.body)).toEqual({ error: "audit persistence failed" });
+      expect(errorSpy).toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it("returns 503 rather than 401 when both auth fails and the sink is down", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const deps = { ...buildDeps(new InMemoryEventSink()), sink: new RejectingEventSink() };
+      const response = await handleGatewayRequest(deps, {
+        provider: "internal-maas",
+        path: "/v1/chat",
+        method: "POST",
+        headers: {},
+      });
+      expect(response.status).toBe(503);
+      errorSpy.mockRestore();
+    });
   });
 });

@@ -114,7 +114,7 @@ describe("forwardRequest", () => {
         { method: "GET", headers: {} },
       );
       expect(result.status).toBe(400);
-      expect(result.errorClass).toBe("path_escapes_route_origin");
+      expect(result.errorClass).toBe("path_escapes_route_scope");
       expect(attackerHit).toBe(false);
     });
 
@@ -130,7 +130,7 @@ describe("forwardRequest", () => {
         { method: "GET", headers: {} },
       );
       expect(result.status).toBe(400);
-      expect(result.errorClass).toBe("path_escapes_route_origin");
+      expect(result.errorClass).toBe("path_escapes_route_scope");
       expect(attackerHit).toBe(false);
     });
 
@@ -156,6 +156,160 @@ describe("forwardRequest", () => {
       // path on the configured route, not a redirect to the attacker.
       expect(result.status).not.toBe(400);
       expect(attackerHit).toBe(false);
+    });
+
+    it("never follows a same-origin upstream's redirect to the attacker", async () => {
+      // Same-origin request, but the *response* is a 302 pointing off-host —
+      // origin/path-scope checks on the request path can't catch this, only
+      // refusing to follow redirects at all can.
+      server.close();
+      server = createServer((req, res) => {
+        if (req.url === "/v1/chat") {
+          res.writeHead(302, {
+            location: `http://127.0.0.1:${attackerPort}/steal`,
+          });
+          res.end();
+          return;
+        }
+        res.writeHead(404).end();
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const redirectingRoute: ProviderRoute = { ...route, baseUrl: `http://127.0.0.1:${port}` };
+
+      const result = await forwardRequest(redirectingRoute, "/v1/chat", {
+        method: "GET",
+        headers: {},
+      });
+
+      expect(result.status).toBe(302);
+      expect(result.errorClass).toBe("upstream_redirect_302");
+      expect(attackerHit).toBe(false);
+    });
+  });
+
+  describe("a route scoped to a sub-path cannot be escaped by traversal", () => {
+    let scopedRoute: ProviderRoute;
+    let requestedUrl: string | undefined;
+
+    beforeEach(async () => {
+      server.close();
+      requestedUrl = undefined;
+      server = createServer((req, res) => {
+        requestedUrl = req.url;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      scopedRoute = {
+        provider: "internal-maas",
+        baseUrl: `http://127.0.0.1:${port}/approved/v1`,
+        upstreamAuthHeader: "x-upstream-key",
+        upstreamApiKey: "upstream-secret",
+      };
+    });
+
+    it("blocks a literal .. traversal out of the configured prefix", async () => {
+      const result = await forwardRequest(scopedRoute, "../../admin/secret", {
+        method: "GET",
+        headers: {},
+      });
+      expect(result.status).toBe(400);
+      expect(result.errorClass).toBe("path_escapes_route_scope");
+      expect(requestedUrl).toBeUndefined();
+    });
+
+    it("blocks a percent-encoded '..' the same as a literal one", async () => {
+      // Verified empirically before writing this assertion, because the
+      // intuitive guess is wrong: the WHATWG URL spec special-cases
+      // ".%2e", "%2e.", and "%2e%2e" as double-dot segments during path
+      // normalization (unlike other percent-encoded characters, which are
+      // left alone), so `new URL()` collapses this exactly like ".." would
+      // — meaning the origin+prefix check catches it for the same reason,
+      // not a separate one.
+      const result = await forwardRequest(scopedRoute, "%2e%2e/admin", {
+        method: "GET",
+        headers: {},
+      });
+      expect(result.status).toBe(400);
+      expect(result.errorClass).toBe("path_escapes_route_scope");
+      expect(requestedUrl).toBeUndefined();
+    });
+
+    it("allows a normal request within the configured prefix", async () => {
+      const result = await forwardRequest(scopedRoute, "chat/completions", {
+        method: "GET",
+        headers: {},
+      });
+      expect(result.status).toBe(200);
+      expect(requestedUrl).toBe("/approved/v1/chat/completions");
+    });
+  });
+
+  it("strips a caller-supplied duplicate of the upstream-auth header regardless of case, so only the real secret reaches upstream", async () => {
+    const receivedHeaders: Record<string, string | string[] | undefined> = {};
+    server.close();
+    server = createServer((req, res) => {
+      Object.assign(receivedHeaders, req.headers);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const localRoute: ProviderRoute = {
+      provider: "internal-maas",
+      baseUrl: `http://127.0.0.1:${port}`,
+      upstreamAuthHeader: "x-upstream-key",
+      upstreamApiKey: "real-secret",
+    };
+
+    await forwardRequest(localRoute, "/v1/chat", {
+      method: "GET",
+      // Differently-cased duplicate of the configured auth header, supplied
+      // by the caller. A plain-object header merge would keep both
+      // "X-Upstream-Key" and "x-upstream-key" as distinct JS object keys.
+      headers: { "X-Upstream-Key": "attacker-supplied-value" },
+    });
+
+    expect(receivedHeaders["x-upstream-key"]).toBe("real-secret");
+    expect(receivedHeaders["X-Upstream-Key"]).toBeUndefined();
+  });
+
+  describe("upstream response size cap", () => {
+    it("aborts and returns 502 when the upstream response exceeds the cap", async () => {
+      server.close();
+      server = createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("x".repeat(1000));
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const localRoute: ProviderRoute = { ...route, baseUrl: `http://127.0.0.1:${port}` };
+
+      const result = await forwardRequest(
+        localRoute,
+        "/v1/chat",
+        { method: "GET", headers: {} },
+        100, // maxResponseBytes
+      );
+
+      expect(result.status).toBe(502);
+      expect(result.errorClass).toBe("upstream_response_too_large");
+    });
+
+    it("passes through a response within the cap", async () => {
+      const result = await forwardRequest(
+        route,
+        "/v1/chat",
+        { method: "GET", headers: {} },
+        1_000_000,
+      );
+      expect(result.status).toBe(200);
     });
   });
 });
