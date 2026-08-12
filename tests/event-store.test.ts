@@ -40,7 +40,7 @@ describe("event store", () => {
 
     expect(result).toEqual({ recordId: event().eventId, inserted: true });
     expect(calls[0]?.sql).toContain("ON CONFLICT (tenant_id, idempotency_key) DO NOTHING");
-    expect(calls[0]?.parameters).toHaveLength(20);
+    expect(calls[0]?.parameters).toHaveLength(21);
   });
 
   it("reports duplicate delivery without replacing the immutable receipt", async () => {

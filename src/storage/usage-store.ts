@@ -10,13 +10,13 @@ interface InsertedRow {
 
 const insertUsageFactSql = `
 INSERT INTO ai_periodic_usage_facts (
-  fact_id, schema_version, tenant_id, idempotency_key, source_fact_id,
-  source_kind, source_provider, grain, period_start, period_end,
+  fact_id, schema_version, tenant_id, idempotency_key, revision_digest, source_fact_id,
+  source_kind, source_provider, grain, period_start, period_end, as_of,
   principal_id, team_id, model_provider, model_name, fact
 ) VALUES (
-  $1, $2, $3, $4, $5,
-  $6, $7, $8, $9, $10,
-  $11, $12, $13, $14, $15::jsonb
+  $1, $2, $3, $4, $5, $6,
+  $7, $8, $9, $10, $11, $12,
+  $13, $14, $15, $16, $17::jsonb
 )
 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
 RETURNING fact_id
@@ -32,12 +32,14 @@ export async function ingestPeriodicUsageFact(
     fact.schemaVersion,
     fact.tenantId,
     fact.idempotencyKey,
+    fact.revisionDigest,
     fact.sourceFactId,
     fact.source.kind,
     fact.source.provider,
     fact.grain,
     fact.period.start,
     fact.period.end,
+    fact.asOf,
     fact.principalId,
     fact.teamId ?? null,
     fact.model.provider,

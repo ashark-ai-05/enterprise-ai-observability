@@ -20,15 +20,15 @@ interface InsertedRow {
 
 const insertEventSql = `
 INSERT INTO ai_event_receipts (
-  event_id, schema_version, tenant_id, idempotency_key, source_event_id,
+  event_id, schema_version, tenant_id, idempotency_key, revision_digest, source_event_id,
   source_kind, source_provider, operation, status, observed_at, received_at,
   principal_id, team_id, run_id, trace_id, span_id, capture_mode,
   content_included, redaction, event
 ) VALUES (
-  $1, $2, $3, $4, $5,
-  $6, $7, $8, $9, $10, $11,
-  $12, $13, $14, $15, $16, $17,
-  $18, $19, $20::jsonb
+  $1, $2, $3, $4, $5, $6,
+  $7, $8, $9, $10, $11, $12,
+  $13, $14, $15, $16, $17, $18,
+  $19, $20, $21::jsonb
 )
 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
 RETURNING event_id
@@ -44,6 +44,7 @@ export async function ingestEvent(
     event.schemaVersion,
     event.tenantId,
     event.idempotencyKey,
+    event.revisionDigest,
     event.sourceEventId,
     event.source.kind,
     event.source.provider,
