@@ -81,13 +81,21 @@ artifact store. File-path intersections are capped at 20 entries.
 
 ## Workflow-contract compatibility
 
-`LineageLink` maps 1:1 onto `workflowLinkSchema` with no translation. Three points were aligned
-after diffing the two envelopes:
+`LineageLink` maps 1:1 onto `workflowLinkSchema` with no translation, and this is **enforced by
+test rather than asserted**: `tests/lineage/contract-conformance.test.ts` validates real resolver
+output — before and after calibration — against the shipped schema. Hand-diffing two envelopes only
+proves they matched when someone looked; validating against the real schema means a future
+divergence fails in CI instead of at ingestion.
 
-- **`relation` is the contract's closed vocabulary** (`parent`, `caused_by`, `derived_from`,
-  `used_evidence`, `produced`, `verified`, `supersedes`), not an open string. These are graph
-  semantics rather than stage names, so adopting them keeps the resolver stage-agnostic while
-  ensuring a link cannot be rejected at ingestion.
+`LineageRelation` is inferred from `workflowLinkRelationSchema` rather than restated, so the two
+cannot drift: adding a relation makes it available here automatically, and removing one is a
+compile error rather than a runtime rejection found in production.
+
+Three points were aligned after diffing the two envelopes:
+
+- **`relation` is the contract's closed vocabulary**, not an open string. These are graph semantics
+  rather than stage names, so adopting them keeps the resolver stage-agnostic while ensuring a link
+  cannot be rejected at ingestion.
 - **`EvidenceValue` excludes `number[]`**, matching the contract's permitted detail union exactly.
   No current rule emits one, but a type this module can produce and the contract cannot ingest is a
   runtime failure waiting for the first rule that uses it.
@@ -113,7 +121,7 @@ files and time — not "feature" or "investigation". Stage semantics stay tenant
 
 ## Status
 
-32 tests. The ambiguity penalty, causality guard and proximity guard were each falsified by
+40 tests, plus conformance against the merged contract. The ambiguity penalty, causality guard and proximity guard were each falsified by
 disabling them and confirming the corresponding test fails. Not yet exercised against real
 telemetry — weights are priors, and `calibrated: false` says so until a live population measures
 them.

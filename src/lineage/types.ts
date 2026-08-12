@@ -11,23 +11,23 @@
  * "investigation". Stage vocabulary is tenant-defined and validated by the workflow contract.
  */
 
+import type { z } from "zod";
+import type { workflowLinkRelationSchema } from "../contracts/workflow.js";
+
 export const RESOLVER_VERSION = "1" as const;
 
 /**
- * Portable graph relations, matching `workflowLinkRelationSchema` in the workflow contract.
+ * Portable graph relations, **derived from** the workflow contract rather than restated.
  *
- * Closed on purpose. These are graph semantics, not workflow stage names — the resolver stays
- * free of "feature"/"investigation" vocabulary, but a link whose relation the contract cannot
- * express would be rejected at ingestion, so an open string here would only defer the failure.
+ * Closed on purpose. These are graph semantics, not workflow stage names — the resolver stays free
+ * of "feature"/"investigation" vocabulary, but a link whose relation the contract cannot express
+ * would be rejected at ingestion, so an open string here would only defer the failure.
+ *
+ * Inferred from `workflowLinkRelationSchema` so the two cannot drift: adding a relation to the
+ * contract makes it available here automatically, and removing one becomes a compile error rather
+ * than a runtime rejection discovered in production.
  */
-export type LineageRelation =
-  | "parent"
-  | "caused_by"
-  | "derived_from"
-  | "used_evidence"
-  | "produced"
-  | "verified"
-  | "supersedes";
+export type LineageRelation = z.infer<typeof workflowLinkRelationSchema>;
 
 /** How a link was established. Deterministic means an identifier genuinely crossed the boundary. */
 export type LinkMethod = "deterministic" | "evidence";
