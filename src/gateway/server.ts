@@ -27,8 +27,21 @@ export function createGatewayServer(
   options: GatewayServerOptions = {},
 ) {
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0) {
+    throw new RangeError(
+      `maxBodyBytes must be a positive integer, got ${maxBodyBytes}`,
+    );
+  }
   return createServer((req, res) => {
-    void handleHttpRequest(deps, req, res, maxBodyBytes);
+    handleHttpRequest(deps, req, res, maxBodyBytes).catch((error: unknown) => {
+      console.error("gateway: unhandled error processing request", error);
+      if (!res.headersSent) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      } else {
+        res.destroy();
+      }
+    });
   });
 }
 

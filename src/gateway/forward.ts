@@ -1,4 +1,5 @@
 import { fetch } from "undici";
+import type { Response as UndiciResponse } from "undici";
 import type { ProviderRoute } from "./routes.js";
 
 export interface ForwardRequestInit {
@@ -14,6 +15,9 @@ export interface ForwardResult {
   readonly latencyMs: number;
   readonly errorClass: string | undefined;
 }
+
+/** Upstream responses are small JSON completions, not downloads. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 5_000_000;
 
 /**
  * Headers stripped before forwarding, beyond `authorization` (which is
@@ -46,15 +50,24 @@ const STRIPPED_HEADERS = new Set([
  * `path` is caller-supplied (it comes off the incoming request URL) and is
  * never trusted to stay within `route.baseUrl` on its own: an absolute or
  * protocol-relative value passed to `new URL(path, base)` escapes `base`
- * entirely, per the WHATWG URL spec, and would hand `upstreamApiKey` to
- * whatever host the caller named — a credential-bearing SSRF. The target is
- * resolved and its origin is checked against the route's origin before
- * anything is sent.
+ * entirely, per the WHATWG URL spec, and a `..` segment can walk out of a
+ * route intentionally scoped to a sub-path even while staying same-origin.
+ * The target is resolved and both its origin *and* its path prefix are
+ * checked against the route before anything is sent.
+ *
+ * Redirects are never followed (`redirect: "manual"`): an upstream that
+ * returns a 3xx to a different host is functionally the same
+ * credential-exfiltration shape as an escaped path, and the standard
+ * `Authorization`-stripping behavior some fetch implementations apply on
+ * cross-origin redirect is not guaranteed for `route.upstreamAuthHeader`,
+ * which is an arbitrary configured header name, not necessarily
+ * `Authorization`.
  */
 export async function forwardRequest(
   route: ProviderRoute,
   path: string,
   init: ForwardRequestInit,
+  maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<ForwardResult> {
   const url = resolveTargetUrl(route, path);
   if (!url) {
@@ -63,13 +76,16 @@ export async function forwardRequest(
       bodyText: "",
       body: undefined,
       latencyMs: 0,
-      errorClass: "path_escapes_route_origin",
+      errorClass: "path_escapes_route_scope",
     };
   }
 
+  const upstreamAuthHeaderLower = route.upstreamAuthHeader.toLowerCase();
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(init.headers)) {
-    if (!STRIPPED_HEADERS.has(key.toLowerCase())) headers[key] = value;
+    const lower = key.toLowerCase();
+    if (STRIPPED_HEADERS.has(lower) || lower === upstreamAuthHeaderLower) continue;
+    headers[key] = value;
   }
   headers[route.upstreamAuthHeader] = route.upstreamApiKey;
 
@@ -78,15 +94,39 @@ export async function forwardRequest(
     const response = await fetch(url, {
       method: init.method,
       headers,
+      redirect: "manual",
       ...(init.body !== undefined ? { body: init.body } : {}),
     });
-    const bodyText = await response.text();
     const latencyMs = performance.now() - startedAt;
+
+    // redirect: "manual" means undici hands back the 3xx itself rather than
+    // following it — this *is* the block, not a follow-up decision.
+    if (response.status >= 300 && response.status < 400) {
+      response.body?.cancel();
+      return {
+        status: response.status,
+        bodyText: "",
+        body: undefined,
+        latencyMs,
+        errorClass: `upstream_redirect_${response.status}`,
+      };
+    }
+
+    const bodyResult = await readCapped(response, maxResponseBytes);
+    if (!bodyResult.ok) {
+      return {
+        status: 502,
+        bodyText: "",
+        body: undefined,
+        latencyMs: performance.now() - startedAt,
+        errorClass: "upstream_response_too_large",
+      };
+    }
     return {
       status: response.status,
-      bodyText,
-      body: safeParseJson(bodyText),
-      latencyMs,
+      bodyText: bodyResult.text,
+      body: safeParseJson(bodyResult.text),
+      latencyMs: performance.now() - startedAt,
       errorClass: response.ok ? undefined : `upstream_${response.status}`,
     };
   } catch (error) {
@@ -103,13 +143,46 @@ export async function forwardRequest(
 }
 
 /**
+ * Read a response body up to `maxBytes`, checking the running total against
+ * every chunk rather than trusting a declared `content-length` — the same
+ * discipline `readBody` applies on the request side in server.ts. Aborts
+ * and cancels the stream the moment the cap is exceeded, whether or not the
+ * upstream declared a length at all.
+ */
+async function readCapped(
+  response: UndiciResponse,
+  maxBytes: number,
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  if (!response.body) return { ok: true, text: "" };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
+}
+
+/**
  * Resolve `path` against `route.baseUrl` and return the target URL only if
- * its origin still matches the route's origin. Construct-then-verify rather
- * than pattern-matching the input string: absolute URLs, protocol-relative
- * (`//host/...`), backslash variants (browsers, and some URL parsers,
- * normalize `\` to `/`), and percent-encoded traversal all resolve down to
- * a single `URL` object before the check runs, so there is no separate
- * blocklist of "bad forms" to keep up to date.
+ * it stays within the route's origin *and* its base path prefix.
+ * Construct-then-verify rather than pattern-matching the input string:
+ * absolute URLs, protocol-relative (`//host/...`), backslash variants
+ * (some URL parsers normalize `\` to `/`), and `..` segments all resolve
+ * down to a single `URL` object before the check runs, so there is no
+ * separate blocklist of "bad forms" to keep up to date. This includes
+ * percent-encoded traversal (`%2e%2e`): the WHATWG URL spec special-cases
+ * `.%2e`/`%2e.`/`%2e%2e` as double-dot segments during path normalization
+ * (verified against Node's actual `URL` behavior, not assumed), so it
+ * collapses exactly like a literal `..` would, and the prefix check below
+ * catches it for the same reason.
  */
 function resolveTargetUrl(route: ProviderRoute, path: string): URL | undefined {
   const base = new URL(ensureTrailingSlash(route.baseUrl));
@@ -119,7 +192,9 @@ function resolveTargetUrl(route: ProviderRoute, path: string): URL | undefined {
   } catch {
     return undefined;
   }
-  return target.origin === base.origin ? target : undefined;
+  if (target.origin !== base.origin) return undefined;
+  if (!target.pathname.startsWith(base.pathname)) return undefined;
+  return target;
 }
 
 function ensureTrailingSlash(url: string): string {
