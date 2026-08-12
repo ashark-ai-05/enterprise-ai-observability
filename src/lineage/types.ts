@@ -13,6 +13,22 @@
 
 export const RESOLVER_VERSION = "1" as const;
 
+/**
+ * Portable graph relations, matching `workflowLinkRelationSchema` in the workflow contract.
+ *
+ * Closed on purpose. These are graph semantics, not workflow stage names — the resolver stays
+ * free of "feature"/"investigation" vocabulary, but a link whose relation the contract cannot
+ * express would be rejected at ingestion, so an open string here would only defer the failure.
+ */
+export type LineageRelation =
+  | "parent"
+  | "caused_by"
+  | "derived_from"
+  | "used_evidence"
+  | "produced"
+  | "verified"
+  | "supersedes";
+
 /** How a link was established. Deterministic means an identifier genuinely crossed the boundary. */
 export type LinkMethod = "deterministic" | "evidence";
 
@@ -61,13 +77,17 @@ export interface LineageNode {
 /**
  * Values permitted in evidence detail.
  *
+ * Mirrors the workflow contract's permitted detail union exactly (no `number[]`): a value this
+ * module can emit but the contract cannot ingest is a runtime failure waiting for the first rule
+ * that uses it.
+ *
  * Deliberately scalar-or-array rather than arbitrary nested `unknown`: a resolved link is a hot
  * metadata record, and an open-ended detail bag would let prompt or log content ride into storage
  * under a metadata-only capture policy. (Constraint from Codex's workflow-link envelope; the same
  * failure shape as thread titles reaching the raw archive.) Rich evidence belongs content-addressed
  * in the protected artifact store, referenced by digest.
  */
-export type EvidenceValue = string | number | boolean | string[] | number[];
+export type EvidenceValue = string | number | boolean | string[];
 
 /** Machine-readable justification for a link. Consumers must be able to audit *why*. */
 export interface LineageEvidence {
@@ -100,8 +120,7 @@ export interface LinkCalibration {
 export interface LineageLink {
   sourceStepId: string;
   targetStepId: string;
-  /** Tenant-defined semantic, e.g. `derived_from`, `produced`, `caused_by`. Opaque here. */
-  relation: string;
+  relation: LineageRelation;
   method: LinkMethod;
   /** 0–1. Exactly 1 only for deterministic links. */
   confidence: number;
@@ -124,6 +143,14 @@ export interface ResolverOptions {
   timeWindowSeconds?: number;
   /** Relative contribution of each evidence kind. Normalized internally. */
   weights?: Partial<Record<"actor" | "repo" | "files" | "time", number>>;
+  /**
+   * Maximum links emitted per source. Default 64, matching the contract's per-step cap.
+   *
+   * Truncation keeps the highest-scoring candidates and is never silent: `candidateCount` reports
+   * the true pre-truncation total, so `candidateCount > links emitted for that source` is a
+   * detectable signal rather than a quietly dropped tail.
+   */
+  maxLinksPerSource?: number;
   /**
    * Divide confidence among equally-plausible targets.
    *

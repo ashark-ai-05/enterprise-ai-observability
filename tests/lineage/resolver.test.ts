@@ -208,3 +208,58 @@ describe("resolveLinks — evidence", () => {
     expect(resolveLinks({ sources: [a], targets: [b], relation: "produced" })).toEqual([]);
   });
 });
+
+describe("workflow contract compatibility", () => {
+  it("caps links per source and reports the true candidate count so truncation is detectable", () => {
+    // The contract caps links at 64 per step. Exceeding it would fail ingestion; truncating
+    // silently would present a tidy list that dropped its tail unannounced.
+    const signals = { principalId: "u1", repo: "acme/api", files: ["src/a.ts"] };
+    const targets = Array.from({ length: 80 }, (_, i) =>
+      node(`commit-${i}`, { occurredAt: at(11 + i * 0.01), signals }),
+    );
+
+    const links = resolveLinks({
+      sources: [node("s", { occurredAt: at(0), endedAt: at(10), signals })],
+      targets,
+      relation: "produced",
+    });
+
+    expect(links).toHaveLength(64);
+    expect(links.every((link) => link.candidateCount === 80)).toBe(true);
+  });
+
+  it("keeps the highest-scoring candidates when truncating", () => {
+    const base = { principalId: "u1", repo: "acme/api" };
+    const targets = [
+      node("weak", { occurredAt: at(300), signals: { ...base, files: ["z.ts"] } }),
+      node("strong", { occurredAt: at(11), signals: { ...base, files: ["a.ts", "b.ts"] } }),
+    ];
+
+    const links = resolveLinks({
+      sources: [
+        node("s", {
+          occurredAt: at(0),
+          endedAt: at(10),
+          signals: { ...base, files: ["a.ts", "b.ts"] },
+        }),
+      ],
+      targets,
+      relation: "produced",
+      options: { maxLinksPerSource: 1 },
+    });
+
+    expect(links).toHaveLength(1);
+    expect(links[0]?.targetStepId).toBe("strong");
+  });
+
+  it("emits at least one evidence item per link, as the contract requires", () => {
+    const signals = { principalId: "u1", repo: "acme/api", files: ["a.ts"] };
+    const links = resolveLinks({
+      sources: [node("s", { occurredAt: at(0), signals })],
+      targets: [node("t", { occurredAt: at(1), signals })],
+      relation: "produced",
+    });
+
+    expect(links.every((link) => link.evidence.length >= 1)).toBe(true);
+  });
+});

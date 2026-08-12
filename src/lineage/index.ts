@@ -8,6 +8,7 @@ export type {
   LineageIdentifier,
   LineageLink,
   LineageNode,
+  LineageRelation,
   LineageSignals,
   LinkCalibration,
   LinkMethod,

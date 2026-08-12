@@ -79,6 +79,25 @@ link is a hot metadata record, and an open-ended detail bag would let prompt or 
 into storage under a metadata-only policy. Rich evidence belongs content-addressed in the protected
 artifact store. File-path intersections are capped at 20 entries.
 
+## Workflow-contract compatibility
+
+`LineageLink` maps 1:1 onto `workflowLinkSchema` with no translation. Three points were aligned
+after diffing the two envelopes:
+
+- **`relation` is the contract's closed vocabulary** (`parent`, `caused_by`, `derived_from`,
+  `used_evidence`, `produced`, `verified`, `supersedes`), not an open string. These are graph
+  semantics rather than stage names, so adopting them keeps the resolver stage-agnostic while
+  ensuring a link cannot be rejected at ingestion.
+- **`EvidenceValue` excludes `number[]`**, matching the contract's permitted detail union exactly.
+  No current rule emits one, but a type this module can produce and the contract cannot ingest is a
+  runtime failure waiting for the first rule that uses it.
+- **Links are capped at 64 per source**, matching the contract's per-step limit. Truncation keeps
+  the highest scorers and is detectable: `candidateCount` reports the true pre-truncation total, so
+  `candidateCount > emitted links` signals a dropped tail rather than hiding it.
+
+Links are returned flat; grouping by `sourceStepId` satisfies the contract's requirement that a
+step's links all originate from it. Self-links are never emitted.
+
 ## Usage
 
 ```ts
