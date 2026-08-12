@@ -96,6 +96,38 @@ That last row matters more than it looks: `repositories` is Amp telling you whic
 worked in, which is an attribution signal with no git instrumentation required. Worth requesting
 the scope even under a metadata-only capture policy — repository names are metadata, not content.
 
+## Mapping onto the shared contract
+
+`src/amp/adapter.ts` converts archived responses into the contract types from `src/index.ts`.
+It reads the raw archive; it never calls the API, so mapping can be re-run against a changed
+contract without re-fetching.
+
+| Amp source | Contract shape | Identity |
+|---|---|---|
+| `/workspace/analytics/daily-usage` | `PeriodicUsageFactInput`, grain `principal_day_model` | `amp:daily:{date}:{userId}:{model}` |
+| `/threads/{id}/usage` | `RawTelemetryEvent`, one per provider/model bucket | `amp:thread-usage:{threadId}:{provider}:{model}` |
+
+Three decisions in the mapping are load-bearing:
+
+**One event per model bucket, never a thread total.** A thread's `usage` is the sum of its
+buckets, so emitting a total event alongside them would double-count spend.
+
+**Line counts land on exactly one fact per user/day.** Amp reports `linesAdded`/`linesDeleted`/
+`linesModified` per *user per day*, but the contract grain is `principal_day_model`. Copying them
+onto every model fact would multiply a user's code output by the number of models they used. They
+are attached to the highest-cost model instead (ties broken by name, so the choice is stable),
+which keeps `SUM(output.linesAdded)` equal to the true daily total. This is a workaround for a
+grain the contract does not have; a `principal_day` grain would model it properly.
+
+**Cost always goes through `toDecimalString()`.** Amp returns cost as a JSON number and
+`String(1e-7)` produces `"1e-7"`, which the contract's decimal regex rejects. Sub-microdollar
+per-thread costs are ordinary. Using the shared helper also means every adapter rounds identically,
+so totals reconcile across sources.
+
+Trace mapping follows `docs/EVENT_CONTRACT.md`: `runId` and `traceId` are the thread, `spanId` is
+the per-observation `sourceEventId`. `sourceEventId` stays stable across restatements, so a
+re-polled active thread produces a new `revisionDigest` and appends rather than colliding.
+
 ## Archive layout
 
 ```
@@ -109,9 +141,9 @@ re-walk rather than wedging the archiver, and every write is idempotent so resta
 
 ## Status
 
-Fixture-driven. 28 tests cover retry/backoff, `Retry-After`, cliff ordering, sub-thread exclusion,
+Fixture-driven. 40 archiver/adapter tests (52 across the repo) cover retry/backoff, `Retry-After`, cliff ordering, sub-thread exclusion,
 404-as-expiry, settle/re-poll behaviour, cursor-boundary re-polling, sweep interval, dedupe, and
-checkpoint recovery. Verified end-to-end against a stub server that honours `after`: run 1 sweeps
+checkpoint recovery, and contract mapping — including that unchanged re-polls dedupe while changed values append. Verified end-to-end against a stub server that honours `after`: run 1 sweeps
 unfiltered and records the past-cliff thread without spending a request; run 2 bounds to the live
 window, re-polls the active thread and skips the settled one.
 
