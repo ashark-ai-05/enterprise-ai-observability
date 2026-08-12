@@ -1,4 +1,9 @@
+export { resolveLinks } from "./resolver.js";
+export type { ResolveRequest } from "./resolver.js";
+export { applyCalibration, calibrate } from "./calibrate.js";
+export type { CalibrateOptions, CalibrationBand, CalibrationResult } from "./calibrate.js";
 export type {
+  EvidenceValue,
   LineageEvidence,
   LineageIdentifier,
   LineageLink,

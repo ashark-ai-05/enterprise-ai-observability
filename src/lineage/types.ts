@@ -58,12 +58,23 @@ export interface LineageNode {
   signals?: LineageSignals;
 }
 
+/**
+ * Values permitted in evidence detail.
+ *
+ * Deliberately scalar-or-array rather than arbitrary nested `unknown`: a resolved link is a hot
+ * metadata record, and an open-ended detail bag would let prompt or log content ride into storage
+ * under a metadata-only capture policy. (Constraint from Codex's workflow-link envelope; the same
+ * failure shape as thread titles reaching the raw archive.) Rich evidence belongs content-addressed
+ * in the protected artifact store, referenced by digest.
+ */
+export type EvidenceValue = string | number | boolean | string[] | number[];
+
 /** Machine-readable justification for a link. Consumers must be able to audit *why*. */
 export interface LineageEvidence {
   /** e.g. `shared_identifier`, `actor_match`, `repo_match`, `file_overlap`, `time_proximity`. */
   kind: string;
   /** Structured detail — the matched identifier, the Jaccard value, the gap in seconds. */
-  detail: Record<string, unknown>;
+  detail: Record<string, EvidenceValue>;
   /** Contribution to the raw score, 0–1. Absent for deterministic evidence. */
   weight?: number;
 }
