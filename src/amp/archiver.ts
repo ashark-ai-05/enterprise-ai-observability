@@ -68,6 +68,11 @@ export interface ArchiverOptions {
   now?: () => Date;
   /** Days per daily-usage request during backfill. Default 30. */
   backfillChunkDays?: number;
+  /**
+   * Whether the client was configured to persist sensitive fields. Recorded on every receipt so
+   * the capture policy is auditable per record, not inferred from a run-level counter.
+   */
+  allowSensitive?: boolean;
 }
 
 export class AmpArchiver {
@@ -77,6 +82,7 @@ export class AmpArchiver {
   private readonly policy: ThreadPollPolicy;
   private readonly now: () => Date;
   private readonly backfillChunkDays: number;
+  private readonly allowSensitive: boolean;
 
   constructor(options: ArchiverOptions) {
     this.client = options.client;
@@ -93,6 +99,7 @@ export class AmpArchiver {
       "backfillChunkDays",
     );
     requireIntegerInRange(this.policy.settleAfterHours, 1, MAX_SETTLE_HOURS, "settleAfterHours");
+    this.allowSensitive = options.allowSensitive ?? false;
   }
 
   async run(): Promise<ArchiveRunSummary> {
@@ -179,6 +186,7 @@ export class AmpArchiver {
         contentHash: fetched.artifact.contentHash,
         deduped: !result.stored,
         fetchedAt: fetched.artifact.fetchedAt,
+        ...this.captureProvenance(fetched.artifact),
       });
       return true;
     } catch (error) {
@@ -233,6 +241,14 @@ export class AmpArchiver {
         const result = await this.store.put(artifact);
         this.countPut(result.stored, summary, artifact);
         candidates.push(thread);
+        if (artifact.redactedFields.length > 0 || this.allowSensitive) {
+          await this.store.observe({
+            stage: "thread-list",
+            contentHash: artifact.contentHash,
+            fetchedAt: artifact.fetchedAt,
+            ...this.captureProvenance(artifact),
+          });
+        }
         const synced = thread.firstSyncedAt;
         if (synced && (!state.lastFirstSyncedAt || synced > state.lastFirstSyncedAt)) {
           // Reporting high-water mark only — deliberately not used as a request cursor.
@@ -300,6 +316,7 @@ export class AmpArchiver {
           contentHash: fetched.artifact.contentHash,
           deduped: !result.stored,
           fetchedAt: fetched.artifact.fetchedAt,
+          ...this.captureProvenance(fetched.artifact),
         });
         if (this.isSettled(thread, now) && thread.updatedAt) settled.set(thread.id, thread.updatedAt);
       } catch (error) {
@@ -353,6 +370,19 @@ export class AmpArchiver {
   private isPastCliff(thread: AmpThreadSummary, now: Date): boolean {
     const age = threadAge(thread, now);
     return age > THREAD_USAGE_WINDOW_DAYS * 86_400_000;
+  }
+
+  /**
+   * Capture provenance stamped on every receipt.
+   *
+   * A run-level count answers "did we redact anything?"; an auditor needs "was *this* record
+   * redacted, and was sensitive capture permitted when it was written?" for each stored blob.
+   */
+  private captureProvenance(artifact: RawArtifact): Record<string, unknown> {
+    return {
+      capturePolicy: this.allowSensitive ? "sensitive_allowed" : "metadata_only",
+      redactedFields: artifact.redactedFields,
+    };
   }
 
   private countPut(stored: boolean, summary: ArchiveRunSummary, artifact?: RawArtifact): void {

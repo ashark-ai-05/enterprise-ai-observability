@@ -157,3 +157,61 @@ describe("AmpClient", () => {
     expect(amp.pageSize).toBe(100);
   });
 });
+
+describe("AmpClient response limits", () => {
+  function streamingFetch(body: string, declaredLength?: string): typeof fetch {
+    return (async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (n: string) => (n.toLowerCase() === "content-length" ? (declaredLength ?? null) : null) },
+      body: {
+        getReader() {
+          const chunks = [new TextEncoder().encode(body)];
+          let i = 0;
+          return {
+            read: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true }),
+            cancel: async () => {},
+            releaseLock: () => {},
+          };
+        },
+      },
+      text: async () => body,
+    })) as unknown as typeof fetch;
+  }
+
+  it("rejects a response whose declared Content-Length exceeds the cap", async () => {
+    const amp = new AmpClient({
+      apiKey: "k",
+      fetch: streamingFetch("{}", "999999999"),
+      maxResponseBytes: 1024,
+    });
+
+    await expect(amp.getThreadUsage("T-1")).rejects.toThrow(/exceeded 1024 bytes/);
+  });
+
+  it("rejects an oversized chunked response that declared no length", async () => {
+    // Chunked responses can omit or understate Content-Length, so the running total is enforced.
+    const amp = new AmpClient({
+      apiKey: "k",
+      fetch: streamingFetch(JSON.stringify({ padding: "x".repeat(5000) })),
+      maxResponseBytes: 1024,
+    });
+
+    await expect(amp.getThreadUsage("T-1")).rejects.toThrow(/exceeded 1024 bytes/);
+  });
+
+  it("accepts a response inside the cap", async () => {
+    const amp = new AmpClient({
+      apiKey: "k",
+      fetch: streamingFetch(JSON.stringify({ threadID: "T-1", subThreadIDs: [], usage: 1, models: [] })),
+      maxResponseBytes: 1024,
+    });
+
+    await expect(amp.getThreadUsage("T-1")).resolves.toMatchObject({ data: { threadID: "T-1" } });
+  });
+
+  it("validates the cap itself rather than accepting a nonsensical limit", () => {
+    expect(() => new AmpClient({ apiKey: "k", maxResponseBytes: 0 })).toThrow(RangeError);
+    expect(() => new AmpClient({ apiKey: "k", maxResponseBytes: -1 })).toThrow(RangeError);
+  });
+});

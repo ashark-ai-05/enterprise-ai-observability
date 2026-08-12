@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FileCheckpointStore, FileRawStore } from "../../src/amp/store.js";
+import { FileCheckpointStore, FileRawStore, InvalidArtifactError } from "../../src/amp/store.js";
 import type { RawArtifact } from "../../src/amp/types.js";
 
 function artifact(overrides: Partial<RawArtifact> = {}): RawArtifact {
@@ -12,7 +13,7 @@ function artifact(overrides: Partial<RawArtifact> = {}): RawArtifact {
     params: {},
     httpStatus: 200,
     fetchedAt: "2026-08-12T00:00:00.000Z",
-    contentHash: "a".repeat(64),
+    contentHash: createHash("sha256").update('{"usage":1}', "utf8").digest("hex"),
     body: { usage: 1 },
     bodyText: '{"usage":1}',
     redactedFields: [],
@@ -34,10 +35,37 @@ describe("FileRawStore", () => {
 
   it("shards blobs by hash prefix so one directory cannot grow unbounded", async () => {
     const store = new FileRawStore(await mkdtemp(join(tmpdir(), "store-")));
+    const bodyText = '{"shard":true}';
+    const contentHash = createHash("sha256").update(bodyText, "utf8").digest("hex");
 
-    const result = await store.put(artifact({ contentHash: `ab${"c".repeat(62)}` }));
+    const result = await store.put(artifact({ bodyText, contentHash, body: { shard: true } }));
 
-    expect(result.path).toBe(join("blobs", "ab", `ab${"c".repeat(62)}.json`));
+    expect(result.path).toBe(join("blobs", contentHash.slice(0, 2), `${contentHash}.json`));
+  });
+
+  it("rejects a non-canonical contentHash before it is used as a path", async () => {
+    // Regression (review finding from Codex on PR #2): contentHash becomes a path segment, and
+    // "../..".slice(0,2) is "..", so an unvalidated hash escapes the archive root.
+    //
+    // Exercised through has(), which does no integrity check — otherwise the hash/bytes
+    // comparison would reject these inputs first and this would pass without the path guard
+    // ever running.
+    const store = new FileRawStore(await mkdtemp(join(tmpdir(), "store-")));
+
+    for (const bad of ["../../../../tmp/pwned", "A".repeat(64), "short", `${"a".repeat(63)}/x`]) {
+      await expect(store.has(bad)).rejects.toBeInstanceOf(InvalidArtifactError);
+    }
+    await expect(store.has("a".repeat(64))).resolves.toBe(false);
+  });
+
+  it("rejects an artifact whose hash does not describe its bytes", async () => {
+    // The hash is the integrity receipt consumers verify against; a mislabelled blob would
+    // otherwise pass verification later and misrepresent what was archived.
+    const store = new FileRawStore(await mkdtemp(join(tmpdir(), "store-")));
+
+    await expect(
+      store.put(artifact({ bodyText: '{"tampered":true}', contentHash: "b".repeat(64) })),
+    ).rejects.toBeInstanceOf(InvalidArtifactError);
   });
 
   it("appends one JSON line per observation", async () => {
