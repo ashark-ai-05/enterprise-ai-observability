@@ -52,9 +52,15 @@ export class FileRawStore implements RawStore {
       return { stored: false, path: relative };
     }
     await mkdir(dirname(absolute), { recursive: true });
-    // Bodies are immutable once written, so pretty-printing costs nothing at read time
-    // and makes the archive greppable during incident review.
-    await writeFile(absolute, JSON.stringify(artifact.body, null, 2), "utf8");
+    // Exactly the bytes that were hashed. Re-serializing (e.g. pretty-printing) would make
+    // rawPayload.digest fail to verify against the blob it points at.
+    // wx: exclusive create, so a concurrent writer cannot half-overwrite an immutable blob.
+    try {
+      await writeFile(absolute, artifact.bodyText, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return { stored: false, path: relative };
+      throw error;
+    }
     return { stored: true, path: relative };
   }
 
@@ -76,8 +82,12 @@ export interface CheckpointState {
   lastFirstSyncedAt?: string;
   /** When the one-time unbounded sweep ran. Until set, listing is unfiltered. */
   coldStartSweepAt?: string;
-  /** Thread IDs whose usage is captured and final (thread inactive, or past the cliff). */
-  settledThreadIds?: string[];
+  /**
+   * Threads whose usage was captured while quiet, keyed by the `updatedAt` observed at
+   * settlement. Storing the version rather than a bare ID is what lets a *resumed* thread be
+   * re-fetched: if current `updatedAt` is newer than the settled one, settlement is void.
+   */
+  settledThreads?: Record<string, string>;
   /** Thread IDs confirmed past the 90-day usage window; never re-request these. */
   expiredThreadIds?: string[];
   /** ISO timestamp of the last completed run. */

@@ -1,47 +1,29 @@
 #!/usr/bin/env node
 import { join } from "node:path";
+import { FlagError, type Flags, parseFlags } from "./amp/flags.js";
 import { AmpArchiver, AmpClient, FileCheckpointStore, FileRawStore } from "./amp/index.js";
 
 const USAGE = `aiobs — enterprise AI observability
 
 Usage:
-  aiobs amp archive [--root <dir>] [--settle-hours <n>] [--chunk-days <n>]
+  aiobs amp archive [--root <dir>] [--settle-hours <n>] [--chunk-days <n>] [--allow-sensitive]
   aiobs amp doctor  [--root <dir>]
 
 Environment:
   AMP_API_KEY   workspace API key (required)
   AMP_BASE_URL  override API base, default https://ampcode.com
 
+Flags:
+  --settle-hours   1..8760, hours of inactivity before cost is treated as final (default 24)
+  --chunk-days     1..365, days per daily-usage request (default 30)
+  --allow-sensitive  persist thread titles and user emails unredacted. Only for an approved,
+                     separately protected store -- the default archive redacts them.
+
 Notes:
   Thread cost is served only for threads under 90 days old; the workspace rollup reaches
   back 365. 'archive' backfills the rollup first, then walks threads oldest-first so the
   records closest to expiry are captured before anything else.
 `;
-
-interface Flags {
-  root: string;
-  settleHours?: number;
-  chunkDays?: number;
-}
-
-function parseFlags(argv: string[]): Flags {
-  const flags: Flags = { root: join(process.cwd(), ".archive", "amp") };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const next = argv[i + 1];
-    if (arg === "--root" && next) {
-      flags.root = next;
-      i++;
-    } else if (arg === "--settle-hours" && next) {
-      flags.settleHours = Number.parseInt(next, 10);
-      i++;
-    } else if (arg === "--chunk-days" && next) {
-      flags.chunkDays = Number.parseInt(next, 10);
-      i++;
-    }
-  }
-  return flags;
-}
 
 function buildArchiver(flags: Flags): AmpArchiver {
   const apiKey = process.env.AMP_API_KEY;
@@ -53,6 +35,7 @@ function buildArchiver(flags: Flags): AmpArchiver {
   }
   const clientOptions: ConstructorParameters<typeof AmpClient>[0] = { apiKey };
   if (process.env.AMP_BASE_URL) clientOptions.baseUrl = process.env.AMP_BASE_URL;
+  if (flags.allowSensitive) clientOptions.allowSensitive = true;
 
   const options: ConstructorParameters<typeof AmpArchiver>[0] = {
     client: new AmpClient(clientOptions),
@@ -75,7 +58,16 @@ async function main(): Promise<void> {
     process.exit(group === undefined ? 0 : 1);
   }
 
-  const flags = parseFlags(rest);
+  let flags: Flags;
+  try {
+    flags = parseFlags(rest);
+  } catch (error) {
+    if (error instanceof FlagError) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
 
   if (command === "doctor") {
     // Cheapest possible reachability check: one day of the rollup. Confirms base URL,

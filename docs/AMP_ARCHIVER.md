@@ -50,14 +50,26 @@ and how the live API treats such rows under `after` is unverified. The first run
 (which is also what inventories the cold-start gap), and `FULL_SWEEP_INTERVAL_DAYS` re-sweeps
 weekly, capping how long any thread can stay invisible at seven days.
 
-**Raw bodies, never transformed.** Responses are stored verbatim, content-addressed by SHA-256.
+**Sensitive fields are redacted before anything is written.** The capture policy is metadata-only
+(D3), but thread `title` is free text — routinely carrying ticket keys or customer names — and the
+daily rollup carries user `email`. Both are stripped at ingest, *before* hashing, and the removal is
+recorded in `redactedFields` and the run summary. Holding `threads.contents:view` must not silently
+reclassify what the archive stores. `--allow-sensitive` opts out, and is only appropriate for an
+approved, separately protected store. Repository names are deliberately kept: they are metadata.
+
+**The digest identifies the stored bytes.** `contentHash` is the SHA-256 of exactly what is written
+to the blob, computed after redaction. An earlier version hashed the response text but wrote
+pretty-printed JSON, so `rawPayload.digest` could never be verified against the blob it referenced.
+Blobs are created exclusively (`wx`), so a concurrent writer cannot half-overwrite an immutable one.
+
+**Raw bodies, otherwise untransformed.** Responses are stored verbatim, content-addressed by SHA-256.
 Normalization happens downstream and may be re-run against a changed contract; that is only safe if
 nothing was discarded at ingest. Identical bodies dedupe to one blob, but *every* fetch appends to
 `observations.jsonl`, so "when did we learn this" stays answerable.
 
 ## The one knob that needs a human decision
 
-`ThreadPollPolicy.settleAfterHours` (default **24**, in `src/amp/archiver.ts`).
+`ThreadPollPolicy.settleAfterHours` (default **24**, range 1–8760, in `src/amp/archiver.ts`).
 
 A thread's cost is not final while the thread is active. Capture once and you freeze a partial
 figure forever; re-poll every run and you spend rate-limit budget that the cliff-facing backlog
@@ -65,6 +77,10 @@ needs more. The default treats 24 hours of inactivity as final.
 
 This is a genuine cost/completeness trade-off that depends on how your teams work — whether Amp
 threads are short bursts or run across days. Override with `--settle-hours <n>`.
+
+Settlement records the `updatedAt` observed when the thread went quiet, not just the thread ID. A
+thread that later *resumes* has a newer `updatedAt`, which voids settlement and re-opens polling.
+Storing bare IDs froze resumed threads at their pre-resumption cost permanently.
 
 ## Usage
 
@@ -141,9 +157,15 @@ re-walk rather than wedging the archiver, and every write is idempotent so resta
 
 ## Status
 
-Fixture-driven. 40 archiver/adapter tests (52 across the repo) cover retry/backoff, `Retry-After`, cliff ordering, sub-thread exclusion,
+Fixture-driven. 51 archiver/adapter/redaction/CLI tests (69 across the repo) cover retry/backoff, `Retry-After`, cliff ordering, sub-thread exclusion,
 404-as-expiry, settle/re-poll behaviour, cursor-boundary re-polling, sweep interval, dedupe, and
-checkpoint recovery, and contract mapping — including that unchanged re-polls dedupe while changed values append. Verified end-to-end against a stub server that honours `after`: run 1 sweeps
+checkpoint recovery, contract mapping, redaction, resumed-thread re-opening, CLI bound rejection, and per-chunk
+checkpointing — including that unchanged re-polls dedupe while changed values append. The two most
+important regressions were falsified by reverting the fix and confirming they fail.
+
+End-to-end against a stub server: `--chunk-days -1` is rejected with exit 1 rather than looping;
+no `title` or `email` reaches the archive; and every stored blob's SHA-256 matches its filename,
+so each `rawPayload.digest` verifies against the bytes it points at. Verified end-to-end against a stub server that honours `after`: run 1 sweeps
 unfiltered and records the past-cliff thread without spending a request; run 2 bounds to the live
 window, re-polls the active thread and skips the settled one.
 

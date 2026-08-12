@@ -14,6 +14,8 @@ function artifact(overrides: Partial<RawArtifact> = {}): RawArtifact {
     fetchedAt: "2026-08-12T00:00:00.000Z",
     contentHash: "a".repeat(64),
     body: { usage: 1 },
+    bodyText: '{"usage":1}',
+    redactedFields: [],
     ...overrides,
   };
 }
@@ -48,6 +50,24 @@ describe("FileRawStore", () => {
     const lines = (await readFile(join(root, "observations.jsonl"), "utf8")).trim().split("\n");
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1] as string)).toMatchObject({ outcome: "past-cliff" });
+  });
+
+  it("stores exactly the bytes that were hashed so the digest identifies the blob", async () => {
+    // Regression (review finding from Codex on PR #2): the store previously wrote
+    // JSON.stringify(body, null, 2), so rawPayload.digest never matched the referenced blob.
+    const { createHash } = await import("node:crypto");
+    const root = await mkdtemp(join(tmpdir(), "store-"));
+    const store = new FileRawStore(root);
+    const bodyText = '{"usage":1.5,"threadID":"T-1"}';
+    const contentHash = createHash("sha256").update(bodyText).digest("hex");
+
+    const result = await store.put(
+      artifact({ bodyText, contentHash, body: JSON.parse(bodyText) as unknown }),
+    );
+
+    const onDisk = await readFile(join(root, result.path), "utf8");
+    expect(onDisk).toBe(bodyText);
+    expect(createHash("sha256").update(onDisk).digest("hex")).toBe(contentHash);
   });
 });
 

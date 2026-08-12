@@ -129,8 +129,18 @@ export interface RawArtifact {
   httpStatus: number;
   /** When the archiver received the response. */
   fetchedAt: string;
-  /** sha256 of the canonical body bytes; identical bodies dedupe to one stored object. */
+  /**
+   * sha256 of `bodyText` — i.e. of exactly the bytes written to the archive, so a
+   * `rawPayload.digest` can be verified by hashing the referenced blob.
+   */
   contentHash: string;
-  /** Exactly as returned by the API. Never transformed. */
+  /** Parsed form of `bodyText`, for consumers that want structure. */
   body: unknown;
+  /**
+   * The exact bytes persisted, post-redaction. Stored verbatim rather than re-serialized:
+   * pretty-printing at write time made the digest fail to identify the blob it referenced.
+   */
+  bodyText: string;
+  /** Field paths removed by redaction before hashing. Empty when nothing was stripped. */
+  redactedFields: string[];
 }

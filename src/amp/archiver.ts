@@ -1,6 +1,6 @@
 import { type AmpClient, AmpNotAvailableError, AmpRequestError } from "./client.js";
 import type { CheckpointState, FileCheckpointStore, RawStore } from "./store.js";
-import type { AmpThreadSummary } from "./types.js";
+import type { AmpThreadSummary, RawArtifact } from "./types.js";
 
 /** Documented by Amp: thread usage is served only for threads under 90 days old. */
 export const THREAD_USAGE_WINDOW_DAYS = 90;
@@ -15,6 +15,8 @@ export const DAILY_USAGE_MAX_LOOKBACK_DAYS = 365;
  * extra walk a week and caps the blast radius of that unknown at seven days.
  */
 export const FULL_SWEEP_INTERVAL_DAYS = 7;
+/** One year of inactivity; anything beyond is past the usage cliff regardless. */
+export const MAX_SETTLE_HOURS = 8760;
 
 export interface ArchiveRunSummary {
   threadsSeen: number;
@@ -28,6 +30,10 @@ export interface ArchiveRunSummary {
   errors: Array<{ threadId?: string; stage: string; message: string }>;
   /** Threads inside the window whose usage is still unfetched when the run ended. */
   atRiskThreadIds: string[];
+  /** Settled threads that resumed activity and were re-opened for polling. */
+  settlementsReopened: number;
+  /** Responses from which sensitive fields were stripped before persistence. */
+  redactedResponses: number;
 }
 
 /**
@@ -78,7 +84,15 @@ export class AmpArchiver {
     this.checkpoints = options.checkpoints;
     this.policy = options.policy ?? DEFAULT_POLL_POLICY;
     this.now = options.now ?? (() => new Date());
-    this.backfillChunkDays = options.backfillChunkDays ?? 30;
+    // Validated here, not only at the CLI: a non-positive chunk size makes the backfill cursor
+    // walk *forward*, so the loop never reaches its bound and hammers the API indefinitely.
+    this.backfillChunkDays = requireIntegerInRange(
+      options.backfillChunkDays ?? 30,
+      1,
+      DAILY_USAGE_MAX_LOOKBACK_DAYS,
+      "backfillChunkDays",
+    );
+    requireIntegerInRange(this.policy.settleAfterHours, 1, MAX_SETTLE_HOURS, "settleAfterHours");
   }
 
   async run(): Promise<ArchiveRunSummary> {
@@ -93,6 +107,8 @@ export class AmpArchiver {
       bodiesDeduped: 0,
       errors: [],
       atRiskThreadIds: [],
+      settlementsReopened: 0,
+      redactedResponses: 0,
     };
     const state = await this.checkpoints.read();
 
@@ -134,6 +150,9 @@ export class AmpArchiver {
       if (!ok) return; // Leave the checkpoint untouched so the next run retries this chunk.
       cursor = addDays(chunkEnd, -lookback);
       state.dailyUsageBackfilledFrom = toDateString(cursor);
+      // Persisted per chunk, not once per run: an interruption mid-backfill must not restart
+      // the year-long walk from today.
+      await this.checkpoints.write(state);
     }
 
     // Always refresh the trailing window — today's figures are still moving.
@@ -148,7 +167,7 @@ export class AmpArchiver {
     try {
       const fetched = await this.client.getDailyUsage({ endDate, lookbackDays });
       const result = await this.store.put(fetched.artifact);
-      this.countPut(result.stored, summary);
+      this.countPut(result.stored, summary, fetched.artifact);
       summary.dailyUsageDaysArchived += fetched.data.data.length;
       await this.store.observe({
         stage: "daily-usage",
@@ -182,7 +201,7 @@ export class AmpArchiver {
    * is the data that was about to become unrecoverable.
    */
   private async archiveThreads(state: CheckpointState, summary: ArchiveRunSummary): Promise<void> {
-    const settled = new Set(state.settledThreadIds ?? []);
+    const settled = new Map(Object.entries(state.settledThreads ?? {}));
     const expired = new Set(state.expiredThreadIds ?? []);
     const now = this.now();
 
@@ -212,7 +231,7 @@ export class AmpArchiver {
       for await (const { thread, artifact } of this.client.iterateThreads(listOptions)) {
         summary.threadsSeen += 1;
         const result = await this.store.put(artifact);
-        this.countPut(result.stored, summary);
+        this.countPut(result.stored, summary, artifact);
         candidates.push(thread);
         const synced = thread.firstSyncedAt;
         if (synced && (!state.lastFirstSyncedAt || synced > state.lastFirstSyncedAt)) {
@@ -253,17 +272,23 @@ export class AmpArchiver {
         continue;
       }
 
-      // A thread enters `settled` only after its usage was captured *and* it had gone quiet,
-      // so membership already implies "captured and final" — no second condition needed.
-      if (settled.has(thread.id)) {
-        summary.usageSkippedSettled += 1;
-        continue;
+      // Settlement records the `updatedAt` seen when the thread went quiet. A thread that
+      // later *resumes* has a newer `updatedAt`, which voids settlement and re-opens polling —
+      // storing bare IDs froze resumed threads at their pre-resumption cost forever.
+      const settledAt = settled.get(thread.id);
+      if (settledAt !== undefined) {
+        if (!isResumedSince(thread, settledAt)) {
+          summary.usageSkippedSettled += 1;
+          continue;
+        }
+        settled.delete(thread.id);
+        summary.settlementsReopened += 1;
       }
 
       try {
         const fetched = await this.client.getThreadUsage(thread.id);
         const result = await this.store.put(fetched.artifact);
-        this.countPut(result.stored, summary);
+        this.countPut(result.stored, summary, fetched.artifact);
         summary.usageFetched += 1;
         await this.store.observe({
           stage: "thread-usage",
@@ -276,7 +301,7 @@ export class AmpArchiver {
           deduped: !result.stored,
           fetchedAt: fetched.artifact.fetchedAt,
         });
-        if (this.isSettled(thread, now)) settled.add(thread.id);
+        if (this.isSettled(thread, now) && thread.updatedAt) settled.set(thread.id, thread.updatedAt);
       } catch (error) {
         if (error instanceof AmpNotAvailableError) {
           // 404 here means the record is gone, not that the request was wrong. Record and move on.
@@ -306,7 +331,7 @@ export class AmpArchiver {
       }
     }
 
-    state.settledThreadIds = [...settled];
+    state.settledThreads = Object.fromEntries(settled);
     state.expiredThreadIds = [...expired];
   }
 
@@ -330,9 +355,10 @@ export class AmpArchiver {
     return age > THREAD_USAGE_WINDOW_DAYS * 86_400_000;
   }
 
-  private countPut(stored: boolean, summary: ArchiveRunSummary): void {
+  private countPut(stored: boolean, summary: ArchiveRunSummary, artifact?: RawArtifact): void {
     if (stored) summary.bodiesStored += 1;
     else summary.bodiesDeduped += 1;
+    if (artifact && artifact.redactedFields.length > 0) summary.redactedResponses += 1;
   }
 }
 
@@ -361,6 +387,22 @@ function daysBetween(from: Date, to: Date): number {
 
 function toDateString(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/** A thread is resumed when its current `updatedAt` is strictly newer than at settlement. */
+function isResumedSince(thread: AmpThreadSummary, settledAt: string): boolean {
+  if (!thread.updatedAt) return false;
+  const current = Date.parse(thread.updatedAt);
+  const previous = Date.parse(settledAt);
+  if (Number.isNaN(current) || Number.isNaN(previous)) return true; // unparseable: re-poll rather than freeze
+  return current > previous;
+}
+
+function requireIntegerInRange(value: number, min: number, max: number, name: string): number {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new RangeError(`${name} must be an integer between ${min} and ${max}, received ${value}`);
+  }
+  return value;
 }
 
 function describe(error: unknown): string {
