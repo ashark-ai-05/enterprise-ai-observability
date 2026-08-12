@@ -16,6 +16,17 @@ class RejectingEventSink implements GatewayEventSink {
   }
 }
 
+/** Succeeds on the Nth call and rejects on every other call, 1-indexed. */
+class FailsOnCallEventSink implements GatewayEventSink {
+  private calls = 0;
+  constructor(private readonly failOnCall: number) {}
+
+  async emit(): Promise<void> {
+    this.calls += 1;
+    if (this.calls === this.failOnCall) throw new Error("sink unavailable");
+  }
+}
+
 const priceBook: PriceBook = {
   version: "test-v1",
   effectiveFrom: "2026-08-01T00:00:00.000Z",
@@ -32,9 +43,12 @@ const priceBook: PriceBook = {
 describe("handleGatewayRequest", () => {
   let server: Server;
   let route: ProviderRoute;
+  let upstreamHit: boolean;
 
   beforeEach(async () => {
+    upstreamHit = false;
     server = createServer((req, res) => {
+      upstreamHit = true;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -95,23 +109,36 @@ describe("handleGatewayRequest", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(sink.events).toHaveLength(1);
-    const event = sink.events[0]!;
-    expect(event.status).toBe("succeeded");
-    expect(event.operation).toBe("model_call");
-    expect(event.identity.principalId).toBe("svc-1");
-    expect(event.tenantId).toBe("acme");
-    expect(event.model).toEqual({ provider: "internal-maas", name: "gpt-x" });
-    expect(event.usage).toEqual({ inputTokens: 200, outputTokens: 100 });
-    expect(event.capture).toEqual({
+    // Two observations of one logical call: a "started" receipt persisted
+    // before the upstream call, and the terminal restatement after it.
+    expect(sink.events).toHaveLength(2);
+
+    const started = sink.events[0]!;
+    expect(started.status).toBe("started");
+    expect(started.operation).toBe("model_call");
+    expect(started.model).toEqual({ provider: "internal-maas", name: "gpt-x" });
+
+    const terminal = sink.events[1]!;
+    expect(terminal.status).toBe("succeeded");
+    expect(terminal.operation).toBe("model_call");
+    expect(terminal.identity.principalId).toBe("svc-1");
+    expect(terminal.tenantId).toBe("acme");
+    expect(terminal.model).toEqual({ provider: "internal-maas", name: "gpt-x" });
+    expect(terminal.usage).toEqual({ inputTokens: 200, outputTokens: 100 });
+    expect(terminal.capture).toEqual({
       mode: "metadata_only",
       contentIncluded: false,
       redaction: "not_applicable",
       policyVersion: "2026-08-12.metadata-only",
     });
-    expect(event.vendor).toEqual({ namespace: "maas.gateway", attributes: {} });
-    expect(event.attributes["internal.cost_usd"]).toBeCloseTo(0.005, 6);
-    expect(event.attributes["internal.price_book_version"]).toBe("test-v1");
+    expect(terminal.vendor).toEqual({ namespace: "maas.gateway", attributes: {} });
+    expect(terminal.attributes["internal.cost_usd"]).toBeCloseTo(0.005, 6);
+    expect(terminal.attributes["internal.price_book_version"]).toBe("test-v1");
+
+    // Same logical call, same sourceEventId, distinct restatement rows —
+    // exactly the pattern already established for Amp/periodic facts.
+    expect(started.sourceEventId).toBe(terminal.sourceEventId);
+    expect(started.idempotencyKey).not.toBe(terminal.idempotencyKey);
   });
 
   it("carries caller-supplied run/trace/span ids through to the event", async () => {
@@ -175,8 +202,12 @@ describe("handleGatewayRequest", () => {
       headers: { authorization: "Bearer good-key" },
     });
     expect(response.status).toBe(400);
-    expect(sink.events[0]!.operation).toBe("policy");
-    expect(sink.events[0]!.attributes.error_class).toBe(
+    // The "started" receipt is emitted before the path is even resolved
+    // (that check lives inside forwardRequest), so the escape shows up on
+    // the terminal restatement, not the started one.
+    expect(sink.events).toHaveLength(2);
+    expect(sink.events[1]!.operation).toBe("policy");
+    expect(sink.events[1]!.attributes.error_class).toBe(
       "path_escapes_route_scope",
     );
   });
@@ -221,7 +252,7 @@ describe("handleGatewayRequest", () => {
   });
 
   describe("fail-closed audit persistence", () => {
-    it("returns 503 instead of the successful upstream response when the sink rejects", async () => {
+    it("never calls upstream when the started receipt can't be persisted", async () => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const deps = { ...buildDeps(new InMemoryEventSink()), sink: new RejectingEventSink() };
       const response = await handleGatewayRequest(deps, {
@@ -231,12 +262,34 @@ describe("handleGatewayRequest", () => {
         headers: { authorization: "Bearer good-key" },
         body: JSON.stringify({ model: "gpt-x" }),
       });
-      // The upstream call genuinely succeeded (the fixture server always
-      // returns 200) — this must not surface as success anyway, because
-      // there is now no record that it happened.
+      // The whole point of writing "started" before forwarding: if we can't
+      // record intent, we never spend the call at all.
       expect(response.status).toBe(503);
       expect(JSON.parse(response.body)).toEqual({ error: "audit persistence failed" });
+      expect(upstreamHit).toBe(false);
       expect(errorSpy).toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it("returns the real upstream result, not 503, when only the terminal receipt fails to persist", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      // 1st sink.emit() call is the started receipt (succeeds), 2nd is the
+      // terminal restatement (fails).
+      const deps = { ...buildDeps(new InMemoryEventSink()), sink: new FailsOnCallEventSink(2) };
+      const response = await handleGatewayRequest(deps, {
+        provider: "internal-maas",
+        path: "/v1/chat",
+        method: "POST",
+        headers: { authorization: "Bearer good-key" },
+        body: JSON.stringify({ model: "gpt-x" }),
+      });
+      // The upstream call already happened and cannot be un-happened —
+      // returning 503 here would just invite a client retry that duplicates
+      // the spend. The durable "started" receipt (persisted successfully)
+      // is what makes this call reconcilable rather than lost, not a 503.
+      expect(upstreamHit).toBe(true);
+      expect(response.status).toBe(200);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("terminal receipt failed to persist"));
       errorSpy.mockRestore();
     });
 
@@ -250,6 +303,7 @@ describe("handleGatewayRequest", () => {
         headers: {},
       });
       expect(response.status).toBe(503);
+      expect(upstreamHit).toBe(false);
       errorSpy.mockRestore();
     });
   });

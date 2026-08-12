@@ -295,7 +295,7 @@ describe("forwardRequest", () => {
         localRoute,
         "/v1/chat",
         { method: "GET", headers: {} },
-        100, // maxResponseBytes
+        { maxResponseBytes: 100 },
       );
 
       expect(result.status).toBe(502);
@@ -307,9 +307,48 @@ describe("forwardRequest", () => {
         route,
         "/v1/chat",
         { method: "GET", headers: {} },
-        1_000_000,
+        { maxResponseBytes: 1_000_000 },
       );
       expect(result.status).toBe(200);
+    });
+  });
+
+  describe("upstream timeout", () => {
+    it("aborts and classifies distinctly when the upstream never responds", async () => {
+      server.close();
+      server = createServer(() => {
+        // Never call res.end() — simulates a stalled upstream.
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const stalledRoute: ProviderRoute = { ...route, baseUrl: `http://127.0.0.1:${port}` };
+
+      const startedAt = Date.now();
+      const result = await forwardRequest(
+        stalledRoute,
+        "/v1/chat",
+        { method: "GET", headers: {} },
+        { timeoutMs: 50 },
+      );
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.status).toBe(502);
+      expect(result.errorClass).toBe("upstream_timeout");
+      // Loose bound — this asserts the timeout fired near its configured
+      // value, not that it waited for some much longer default.
+      expect(elapsedMs).toBeLessThan(2000);
+    });
+
+    it("does not time out a response that arrives comfortably within the deadline", async () => {
+      const result = await forwardRequest(
+        route,
+        "/v1/chat",
+        { method: "GET", headers: {} },
+        { timeoutMs: 5000 },
+      );
+      expect(result.status).toBe(200);
+      expect(result.errorClass).toBeUndefined();
     });
   });
 });

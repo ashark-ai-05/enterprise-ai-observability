@@ -5,7 +5,13 @@ export {
   type GatewayResponse,
 } from "./gateway.js";
 export { createGatewayServer, type GatewayServerOptions } from "./server.js";
-export { forwardRequest, type ForwardResult } from "./forward.js";
+export {
+  forwardRequest,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  DEFAULT_TIMEOUT_MS,
+  type ForwardOptions,
+  type ForwardResult,
+} from "./forward.js";
 export { extractUsage } from "./meter.js";
 export {
   priceUsage,

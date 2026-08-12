@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { CanonicalEvent, EventStatus, RawTelemetryEvent } from "../contracts/events.js";
 import { normalizeTelemetryEvent } from "../ingest/normalize.js";
-import { forwardRequest } from "./forward.js";
+import { DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, forwardRequest } from "./forward.js";
 import { extractUsage } from "./meter.js";
 import type { PriceBook } from "./pricebook.js";
 import { priceUsage } from "./pricebook.js";
@@ -29,6 +29,8 @@ export interface GatewayDeps {
   readonly sink: GatewayEventSink;
   readonly now?: () => Date;
   readonly newId?: () => string;
+  readonly maxUpstreamResponseBytes?: number;
+  readonly upstreamTimeoutMs?: number;
 }
 
 export interface GatewayRequest {
@@ -55,11 +57,21 @@ export interface GatewayResponse {
  * have context for," which is the coverage metric the design docs call out
  * as the shadow-AI detector.
  *
- * Fail-closed on audit persistence: if the event sink can't record a call,
- * this returns 503 regardless of what the upstream call actually did. An
- * observability gateway that returns a normal response while silently
- * failing to record it has defeated its own purpose — better an honest
- * error than an uncounted success.
+ * Fail-closed on audit persistence, in both directions:
+ *
+ * - Before the (possibly paid, possibly mutating) upstream call, a durable
+ *   `started` receipt is persisted under a stable `sourceEventId`. If that
+ *   write fails, this returns 503 and the upstream is never called — no
+ *   money spent, nothing to reconcile.
+ * - After the call, a terminal restatement (`succeeded`/`failed`) is
+ *   appended under the *same* `sourceEventId`, using the contract's normal
+ *   restatement semantics (distinct revisionDigest/idempotencyKey, same
+ *   logical event). If that second write fails, the upstream call already
+ *   happened and cannot be un-happened — returning 503 here would invite a
+ *   client retry that duplicates the spend, so the real upstream result is
+ *   returned instead. The `started` receipt is not invisible; it is the
+ *   record that lets an operator reconcile an incomplete lifecycle rather
+ *   than losing the call entirely, which is what happened before this fix.
  */
 export async function handleGatewayRequest(
   deps: GatewayDeps,
@@ -78,8 +90,8 @@ export async function handleGatewayRequest(
     );
   } catch (error) {
     const persisted = await emit(deps, {
+      sourceEventId: newId(),
       now,
-      newId,
       observedAt,
       trace,
       tenantId: "unknown",
@@ -106,8 +118,8 @@ export async function handleGatewayRequest(
   const route = resolveRoute(deps.routes, request.provider);
   if (!route) {
     const persisted = await emit(deps, {
+      sourceEventId: newId(),
       now,
-      newId,
       observedAt,
       trace,
       tenantId: principal.tenant,
@@ -122,22 +134,48 @@ export async function handleGatewayRequest(
     return { status: 404, body: JSON.stringify({ error: "unknown provider" }) };
   }
 
-  const result = await forwardRequest(route, request.path, {
-    method: request.method,
-    headers: request.headers,
-    ...(request.body !== undefined ? { body: request.body } : {}),
-  });
+  const sourceEventId = newId();
+  const requestedModel = extractModel(request.body);
 
-  const modelName = extractModel(request.body) ?? extractModel(result.bodyText);
+  const startedPersisted = await emit(deps, {
+    sourceEventId,
+    now,
+    observedAt,
+    trace,
+    tenantId: principal.tenant,
+    principal,
+    provider: request.provider,
+    status: "started",
+    model: requestedModel ? { provider: request.provider, name: requestedModel } : undefined,
+    usage: undefined,
+    attributes: {},
+  });
+  if (!startedPersisted) return AUDIT_FAILURE_RESPONSE;
+
+  const result = await forwardRequest(
+    route,
+    request.path,
+    {
+      method: request.method,
+      headers: request.headers,
+      ...(request.body !== undefined ? { body: request.body } : {}),
+    },
+    {
+      maxResponseBytes: deps.maxUpstreamResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+      timeoutMs: deps.upstreamTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+    },
+  );
+
+  const modelName = requestedModel ?? extractModel(result.bodyText);
   const usage = extractUsage(result.body);
   const costUsd =
     usage && modelName
       ? priceUsage(deps.priceBook, request.provider, modelName, usage)
       : undefined;
 
-  const persisted = await emit(deps, {
+  const terminalPersisted = await emit(deps, {
+    sourceEventId,
     now,
-    newId,
     observedAt,
     trace,
     tenantId: principal.tenant,
@@ -161,14 +199,18 @@ export async function handleGatewayRequest(
         : {}),
     },
   });
-  if (!persisted) return AUDIT_FAILURE_RESPONSE;
+  if (!terminalPersisted) {
+    console.error(
+      `gateway: upstream call for sourceEventId=${sourceEventId} completed (status ${result.status}) but its terminal receipt failed to persist — a "started" observation exists for reconciliation, but this call's outcome is not otherwise recorded`,
+    );
+  }
 
   return { status: result.status, body: result.bodyText };
 }
 
 interface EmitInput {
+  readonly sourceEventId: string;
   readonly now: () => Date;
-  readonly newId: () => string;
   readonly observedAt: Date;
   readonly trace: {
     readonly runId: string;
@@ -198,6 +240,10 @@ interface EmitInput {
  * `normalizeTelemetryEvent()` (PR #1) rather than constructing a
  * `CanonicalEvent` by hand — `eventId`, `idempotencyKey`, and
  * `revisionDigest` are the normalizer's job, not this gateway's.
+ * `sourceEventId` is caller-supplied rather than generated here so a
+ * started/terminal pair can share one logical event identity; the
+ * normalizer's per-content revisionDigest is what makes the two persist as
+ * distinct restatement rows instead of colliding.
  *
  * Returns whether persistence succeeded rather than throwing: the caller
  * decides the fail-closed response, and there is no event to emit about a
@@ -207,7 +253,7 @@ interface EmitInput {
  */
 async function emit(deps: GatewayDeps, input: EmitInput): Promise<boolean> {
   const raw: RawTelemetryEvent = {
-    sourceEventId: input.newId(),
+    sourceEventId: input.sourceEventId,
     tenantId: input.tenantId,
     source: { kind: "maas", provider: input.provider },
     identity: {
@@ -233,12 +279,6 @@ async function emit(deps: GatewayDeps, input: EmitInput): Promise<boolean> {
     attributes: input.attributes,
     vendor: { namespace: "maas.gateway", attributes: {} },
   };
-  // `eventId` is intentionally not sourced from `deps.newId` — that hook
-  // exists so tests can produce readable, deterministic sourceEventId/trace
-  // ids, but the canonical schema requires eventId to be a real UUID, and
-  // normalizeTelemetryEvent's own default (randomUUID()) already satisfies
-  // that without coupling this module to UUID generation.
-  //
   // normalizeTelemetryEvent() itself throws on schema validation failure,
   // so it must be inside this try too, not just the sink write — otherwise
   // a normalization failure propagates out of handleGatewayRequest uncaught

@@ -73,7 +73,7 @@ describe("emitted events conform to the real canonical event schema (PR #1)", ()
     };
   }
 
-  it("a successful model_call event round-trips through the real schema", async () => {
+  it("both the started receipt and the terminal restatement round-trip through the real schema", async () => {
     const sink = new InMemoryEventSink();
     await handleGatewayRequest(buildDeps(sink), {
       provider: "internal-maas",
@@ -82,8 +82,11 @@ describe("emitted events conform to the real canonical event schema (PR #1)", ()
       headers: { authorization: "Bearer good-key" },
       body: JSON.stringify({ model: "gpt-x" }),
     });
-    expect(sink.events[0]!.operation).toBe("model_call");
-    expect(canonicalEventSchema.safeParse(sink.events[0]).success).toBe(true);
+    expect(sink.events).toHaveLength(2);
+    for (const event of sink.events) {
+      expect(event.operation).toBe("model_call");
+      expect(canonicalEventSchema.safeParse(event).success).toBe(true);
+    }
   });
 
   it("an auth-failure policy event round-trips (this is exactly the shape the earlier bug broke)", async () => {

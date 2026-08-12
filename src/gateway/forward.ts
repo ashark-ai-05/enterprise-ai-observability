@@ -19,6 +19,14 @@ export interface ForwardResult {
 /** Upstream responses are small JSON completions, not downloads. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 5_000_000;
 
+/** A stalled MaaS endpoint must not hold a gateway connection indefinitely. */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface ForwardOptions {
+  readonly maxResponseBytes?: number;
+  readonly timeoutMs?: number;
+}
+
 /**
  * Headers stripped before forwarding, beyond `authorization` (which is
  * replaced with the upstream credential). Hop-by-hop headers are meaningful
@@ -62,13 +70,23 @@ const STRIPPED_HEADERS = new Set([
  * cross-origin redirect is not guaranteed for `route.upstreamAuthHeader`,
  * which is an arbitrary configured header name, not necessarily
  * `Authorization`.
+ *
+ * A hard deadline (`AbortController`, default 30s) bounds every call: a
+ * stalled upstream must not be able to hold a gateway connection — and the
+ * concurrency slot behind it — indefinitely. Timeout is classified
+ * distinctly (`upstream_timeout`) rather than folded into the generic
+ * fetch-error path, since "the upstream is slow" and "the upstream is
+ * unreachable" call for different operational responses.
  */
 export async function forwardRequest(
   route: ProviderRoute,
   path: string,
   init: ForwardRequestInit,
-  maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
+  options: ForwardOptions = {},
 ): Promise<ForwardResult> {
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
   const url = resolveTargetUrl(route, path);
   if (!url) {
     return {
@@ -90,11 +108,14 @@ export async function forwardRequest(
   headers[route.upstreamAuthHeader] = route.upstreamApiKey;
 
   const startedAt = performance.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       method: init.method,
       headers,
       redirect: "manual",
+      signal: controller.signal,
       ...(init.body !== undefined ? { body: init.body } : {}),
     });
     const latencyMs = performance.now() - startedAt;
@@ -136,10 +157,19 @@ export async function forwardRequest(
       bodyText: "",
       body: undefined,
       latencyMs,
-      errorClass:
-        error instanceof Error ? error.name || "fetch_error" : "fetch_error",
+      errorClass: isAbortError(error) ? "upstream_timeout" : classifyError(error),
     };
+  } finally {
+    clearTimeout(timeout);
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function classifyError(error: unknown): string {
+  return error instanceof Error ? error.name || "fetch_error" : "fetch_error";
 }
 
 /**
