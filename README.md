@@ -35,7 +35,7 @@ Verified against vendor documentation on 2026-08-12:
 
 - **Amp has no OpenTelemetry support, but does have an Enterprise API v2** ([schema](https://ampcode.com/api/v2/openapi.json)) exposing `GET /api/v2/threads`, `/threads/{id}/messages`, and `/threads/{id}/usage` (per-thread cost). Since Amp persists threads server-side, this can be polled centrally with zero endpoint installs — which matters a great deal under a no-installs constraint.
 
-- ⚠️ **Amp serves thread usage data only for threads under 90 days old.** This is a hard retention cliff and the only time-sensitive item in the whole design: every day an archiver isn't running, a day of cost history is lost permanently. It also creates an awkward squeeze — the outcome facts you want to attribute cost to (code survival, incident linkage) *arrive* at ~90 days, exactly as the cost facts *expire*.
+- ⚠️ **Amp exposes two usage grains with different windows.** Thread-level usage is available only for threads under 90 days old, so delayed archiving permanently loses work-level cost attribution. The workspace daily-usage endpoint supports up to 365 days of per-user/day/model aggregate usage, preserving a longer cost baseline but no thread linkage. The implementation keeps these as separate facts rather than fabricating run IDs for aggregates.
 
 ## Design positions worth arguing with
 
@@ -55,7 +55,18 @@ The parts most likely to be contested, stated plainly so a reviewer can push bac
 
 ## Status
 
-Design only. Nothing has been implemented, configured, deployed, or collected. Several assumptions are marked **[VERIFY]** in the documents and depend on facts about a specific tenant that documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths** under metadata-only capture, which the probabilistic attribution tier depends on.
+The first implementation slice is in development: canonical event and periodic-usage contracts plus append-only PostgreSQL ingestion. No collectors have been configured or deployed, and no enterprise data has been collected. Several assumptions are marked **[VERIFY]** in the documents and depend on facts about a specific tenant that documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths** under metadata-only capture, which the probabilistic attribution tier depends on.
+
+## Development
+
+The first implementation slice defines the shared provider-neutral event contract, periodic usage-fact contract, and PostgreSQL receipt schema. See [Canonical event contract](docs/EVENT_CONTRACT.md).
+
+```bash
+pnpm install
+pnpm check
+```
+
+`pnpm check` runs strict TypeScript validation, the full Vitest suite (including PGlite migration coverage), and the production build.
 
 ## Provenance
 
