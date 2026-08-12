@@ -116,4 +116,32 @@ describe("canonical event contract", () => {
     expect(toDecimalString(0.1 + 0.2, 6)).toBe("0.3");
     expect(toDecimalString(1e21, 6)).toBe("1000000000000000000000");
   });
+
+  it("accepts an eil retrieval event carrying an evidence workflow role", () => {
+    const event = normalizeTelemetryEvent(
+      {
+        ...rawEvent,
+        source: { kind: "eil", provider: "enterprise-intelligence-layer" },
+        operation: "retrieval",
+        model: undefined,
+        usage: undefined,
+        workflow: {
+          workflowId: "wf-1",
+          workflowType: "incident",
+          attemptId: "attempt-1",
+          stepId: "step-eil-search",
+          stage: "search",
+          layer: "eil",
+          role: "evidence",
+          links: [],
+        },
+        vendor: { namespace: "eil.v1", attributes: { query: "payment retry policy" } },
+      },
+      { eventId: "00000000-0000-4000-8000-000000000004" },
+    );
+
+    expect(event.source.kind).toBe("eil");
+    expect(event.workflow?.layer).toBe("eil");
+    expect(event.workflow?.role).toBe("evidence");
+  });
 });
