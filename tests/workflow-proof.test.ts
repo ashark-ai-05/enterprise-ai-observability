@@ -403,6 +403,20 @@ describe("generic workflow lineage proof", () => {
     expect(trace.issues.map((issue) => issue.code)).toContain("dangling_link");
   });
 
+  it("rejects mixed workflows and duplicate logical steps", () => {
+    const first = proofFlow("wf:first", "generic", featureSteps.slice(0, 1))[0]!;
+    const other = proofFlow("wf:other", "generic", featureSteps.slice(0, 1))[0]!;
+    const duplicate = {
+      ...first,
+      eventId: "00000000-0000-4000-8000-999999999999",
+    };
+    const trace = reconstructWorkflowTrace([first, other, duplicate]);
+
+    expect(trace.complete).toBe(false);
+    expect(trace.issues.map((issue) => issue.code)).toContain("mixed_workflow");
+    expect(trace.issues.map((issue) => issue.code)).toContain("duplicate_step");
+  });
+
   it("rejects disconnected artifacts and outcomes that merely coexist with evidence", () => {
     const events = proofFlow("wf:disconnected", "generic", featureSteps);
     const disconnected = events.map((event) =>
