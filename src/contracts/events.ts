@@ -9,6 +9,7 @@ export const sourceKindSchema = z.enum([
   "maas",
   "harness",
   "egress_proxy",
+  "eil",
 ]);
 
 export const operationSchema = z.enum([

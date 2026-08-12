@@ -24,6 +24,7 @@ The environment these designs target:
 | **[docs/DECISIONS.md](docs/DECISIONS.md)** | 15 locked decisions, each with rationale and a reversal trigger. Two-tier attribution design. Buildable phase 0/1 spec |
 | **[docs/TARGET_DESIGN.md](docs/TARGET_DESIGN.md)** | Parallel design from a second agent — "AI Effectiveness Observatory". Event schema, lifecycle state machines, product surfaces. Converges with the above; retained because the schema detail is more developed |
 | **[docs/CONTEXT_COLLABORATION_PLATFORM.md](docs/CONTEXT_COLLABORATION_PLATFORM.md)** | Background. The multi-agent collaboration platform design this observability work was carved out of. Shares the model-broker/gateway component |
+| **[docs/DEMO_PLAN.md](docs/DEMO_PLAN.md)** | Spec for the combined `enterprise-intelligence-layer` × observability demo — corpus fixes required before its metrics are honest, the event-bridge contract, and sequencing |
 
 Start with `ARCHITECTURE.md`, then `DECISIONS.md`.
 

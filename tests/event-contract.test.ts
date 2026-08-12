@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalEventSchema } from "../src/contracts/events.js";
 import {
@@ -115,5 +116,45 @@ describe("canonical event contract", () => {
     expect(toDecimalString(1e-7, 12)).toBe("0.0000001");
     expect(toDecimalString(0.1 + 0.2, 6)).toBe("0.3");
     expect(toDecimalString(1e21, 6)).toBe("1000000000000000000000");
+  });
+
+  it("accepts an eil retrieval event carrying an evidence workflow role", () => {
+    // metadata_only is only checked against contentIncluded (events.ts superRefine,
+    // migrations.ts CHECK) — nothing inspects vendor.attributes, and ai_event_receipts
+    // is append-only. A raw query string here would be a permanent, unredactable leak,
+    // so the reference example carries a digest instead, and asserts the raw text is
+    // absent from what actually gets persisted.
+    const rawQuery = "payment retry policy";
+    const queryDigest = `sha256:${createHash("sha256").update(rawQuery).digest("hex")}`;
+
+    const event = normalizeTelemetryEvent(
+      {
+        ...rawEvent,
+        source: { kind: "eil", provider: "enterprise-intelligence-layer" },
+        operation: "retrieval",
+        model: undefined,
+        usage: undefined,
+        workflow: {
+          workflowId: "wf-1",
+          workflowType: "incident",
+          attemptId: "attempt-1",
+          stepId: "step-eil-search",
+          stage: "search",
+          layer: "eil",
+          role: "evidence",
+          links: [],
+        },
+        vendor: {
+          namespace: "eil.v1",
+          attributes: { query_digest: queryDigest, result_count: 3, arm: "lexical" },
+        },
+      },
+      { eventId: "00000000-0000-4000-8000-000000000004" },
+    );
+
+    expect(event.source.kind).toBe("eil");
+    expect(event.workflow?.layer).toBe("eil");
+    expect(event.workflow?.role).toBe("evidence");
+    expect(JSON.stringify(event)).not.toContain(rawQuery);
   });
 });
