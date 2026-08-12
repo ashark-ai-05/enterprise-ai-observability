@@ -1,6 +1,6 @@
 # Enterprise AI Observability
 
-**Design artefacts for observing, attributing and evaluating AI coding agents in an enterprise. Design only — no implementation.**
+**A metadata-first implementation and design for observing, attributing, and evaluating AI agents in an enterprise.**
 
 How much is AI coding assistance costing, and what is it actually producing? Most answers today stop at token counts. This design goes after the harder question: tracing a dollar spent on a prompt through to a merged pull request, a shipped feature, or a resolved incident — and doing it inside enterprise constraints, behind a corporate proxy, without installing arbitrary software.
 
@@ -55,18 +55,59 @@ The parts most likely to be contested, stated plainly so a reviewer can push bac
 
 ## Status
 
-The first implementation slice is in development: canonical event and periodic-usage contracts plus append-only PostgreSQL ingestion. No collectors have been configured or deployed, and no enterprise data has been collected. Several assumptions are marked **[VERIFY]** in the documents and depend on facts about a specific tenant that documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths** under metadata-only capture, which the probabilistic attribution tier depends on.
+The Phase 0 implementation is merged. It includes the canonical event and periodic-usage contracts,
+append-only PostgreSQL ingestion, Amp usage archiving, a MaaS metering gateway, workflow trace
+reconstruction, two executable end-to-end proofs, and a calibrated cross-boundary lineage resolver.
 
-## Development
+No collectors have been configured or deployed, and no enterprise data has been collected. Several
+assumptions are marked **[VERIFY]** in the documents and depend on facts about a specific tenant that
+documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths**
+under metadata-only capture, which the probabilistic attribution tier depends on.
 
-The first implementation slice defines the shared provider-neutral event contract, periodic usage-fact contract, and PostgreSQL receipt schema. See [Canonical event contract](docs/EVENT_CONTRACT.md).
+## Run locally
+
+Prerequisites: Git, Node.js 22 or newer, and pnpm 10.32.1 (the version pinned in `package.json`).
 
 ```bash
+git clone https://github.com/ashark-ai-05/enterprise-ai-observability.git
+cd enterprise-ai-observability
+corepack enable
+corepack prepare pnpm@10.32.1 --activate
 pnpm install
 pnpm check
 ```
 
 `pnpm check` runs strict TypeScript validation, the full Vitest suite (including PGlite migration coverage), and the production build.
+
+Run the two generic traceability proofs directly:
+
+```bash
+pnpm exec vitest run tests/workflow-proof.test.ts
+```
+
+Run the Amp collector's local help after the build produced by `pnpm check`:
+
+```bash
+node dist/cli.js
+```
+
+For a real Amp workspace, keep the API key out of shell history by reading it without echo, then
+run the one-call connectivity check before the archive:
+
+```bash
+read -rs "AMP_API_KEY?Amp workspace API key: "
+export AMP_API_KEY
+node dist/cli.js amp doctor
+node dist/cli.js amp archive --root ./.archive/amp --chunk-days 30
+```
+
+The archive is metadata-only by default: thread titles and user emails are redacted before storage.
+Do not use `--allow-sensitive` without an approved, separately protected store. Required Amp scopes,
+archive layout, retry behaviour, and exit codes are in [the Amp runbook](docs/AMP_ARCHIVER.md).
+
+The MaaS gateway and PostgreSQL ingestion are currently library components with fixture-driven tests,
+not packaged deployment services. Exercise them with the full `pnpm check`; integrate them only after
+choosing the tenant's authentication, secret management, PostgreSQL, and deployment boundaries.
 
 ## Provenance
 
