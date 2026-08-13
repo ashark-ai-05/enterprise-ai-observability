@@ -101,5 +101,7 @@ describe("PostgreSQL ingestion", () => {
       "SELECT event_id::text FROM ai_latest_event_receipts",
     );
     expect(latest.rows).toEqual([{ event_id: restated.eventId }]);
-  });
+    // Same PGlite startup cost as the workflow proof: real work, too close to
+    // vitest's 5s default to survive a loaded runner.
+  }, 30_000);
 });

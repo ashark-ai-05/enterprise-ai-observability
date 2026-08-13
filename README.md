@@ -75,6 +75,7 @@ Phase 0 is merged to `main`. Five components, all provider-neutral over the same
 | Amp archiver | `src/amp/` | Polls the Amp Enterprise API for threads and workspace usage; redacts by default; checkpointed and resumable. Captures per-thread cost before the 90-day cliff |
 | MaaS metering gateway | `src/gateway/` | Authenticates a principal, forwards to an internal model endpoint, meters token usage, prices it, and writes an audit receipt. Fails closed if the receipt cannot be written |
 | Workflow traceability | `src/contracts/workflow.ts`, `src/workflow/` | Workflow/attempt/step/layer model, graph reconstruction, completion-integrity gates, and two executable end-to-end proof flows |
+| Span measurement | `src/workflow/duration.ts`, `src/workflow/measure.ts` | Per-span duration from paired start/end observations, and trace rollups for active work, wait, tool calls and model calls. Every figure is `known: false` with a reason rather than `0` when it cannot be measured |
 | Lineage resolver | `src/lineage/` | Joins steps across boundaries that cannot carry trace context, with evidence, confidence, calibration and provenance rather than silent invention |
 
 **Nothing here has been pointed at a real system.** No collectors are configured or deployed, no credentials are stored in the repo, and no enterprise data has been collected. Several assumptions are marked **[VERIFY]** in the documents and depend on facts about a specific tenant that documentation cannot settle — most importantly whether Copilot's telemetry carries **file paths** under metadata-only capture, which the probabilistic attribution tier depends on.
@@ -82,6 +83,9 @@ Phase 0 is merged to `main`. Five components, all provider-neutral over the same
 ## Run locally
 
 Prerequisites: Git, Node.js 22 or newer, and pnpm 10.32.1 (the version pinned in `package.json`).
+
+If GitHub is unreachable from your machine, do not download the ZIP — see
+[Running it where GitHub is blocked](#running-it-where-github-is-blocked) below.
 
 ```bash
 git clone https://github.com/ashark-ai-05/enterprise-ai-observability.git
@@ -92,7 +96,7 @@ pnpm install
 pnpm check
 ```
 
-`pnpm check` is the full gate — it runs `pnpm typecheck` (strict, no emit), `pnpm test`, and `pnpm build`. Expect **164 tests passing across 21 files, 1 skipped**. The skip is a live-credential gateway test that only runs when real credentials are present; it is skipped by design. No network access and no database are needed — the PostgreSQL migration and ingestion tests run against in-process [PGlite](https://pglite.dev). CI (`.github/workflows/ci.yml`) runs the same gate on every push and PR.
+`pnpm check` is the full gate — it runs `pnpm typecheck` (strict, no emit), `pnpm test`, and `pnpm build`. Expect **178 tests passing across 23 files, 1 skipped**. The skip is a live-credential gateway test that only runs when real credentials are present; it is skipped by design. No network access and no database are needed — the PostgreSQL migration and ingestion tests run against in-process [PGlite](https://pglite.dev). CI (`.github/workflows/ci.yml`) runs the same gate on every push and PR.
 
 Individual steps, if you want them separately:
 
@@ -175,6 +179,54 @@ server.listen(8080);
 The package is `private` and unpublished with no `exports` map, so import from the built `dist/` path rather than by package name (or straight from `src/` if you run through `vitest`/`tsx`). Requests are served under `/v1/gateway/`. See `src/gateway/index.ts` for the exported surface and `tests/gateway/` for worked examples of every dependency you need to supply.
 
 Exercise both with the full `pnpm check`; integrate them only after choosing the tenant's authentication, secret management, PostgreSQL, and deployment boundaries.
+
+## Running it where GitHub is blocked
+
+**Do not use GitHub's "Download ZIP".** A ZIP contains no `.git`, and
+`eil-observability-demo`'s cross-repo integration test verifies which revision
+it ran against by shelling out to `git rev-parse HEAD`. Without `.git` it does
+not degrade — it refuses: *"is not a git checkout, so its revision cannot be
+verified."* Re-running `git init` afterwards produces a new SHA that cannot
+match the pinned revision, which fails differently for the same reason.
+
+Use a **git bundle** instead: a single ordinary file that travels the same route
+a ZIP does, but preserves full history, every branch, and real commit SHAs.
+Prebuilt bundles for all three repositories, with checksums, are published at
+[`corp-transfer-1`](https://github.com/ashark-ai-05/eil-observability-demo/releases/tag/corp-transfer-1).
+
+To build them yourself, from a machine that can reach GitHub:
+
+```bash
+git clone --mirror https://github.com/ashark-ai-05/<repo>.git <repo>.git
+git -C <repo>.git bundle create ../<repo>.bundle --all
+```
+
+On the target machine:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt          # verify the transfer
+git clone <repo>.bundle <repo>
+cd <repo>
+git remote set-url origin https://stash.corp/scm/<project>/<repo>.git
+git push --all origin && git push --tags origin
+```
+
+Two things that catch people out:
+
+- **Dependencies are a separate problem from GitHub.** `pnpm install` needs an
+  npm registry (Artifactory/Nexus), not GitHub. Test
+  `pnpm install --frozen-lockfile` first — it decides whether any offline work
+  is needed at all. If it is, `pnpm fetch --store-dir ./offline-store` builds a
+  portable store from the lockfile, but **build it on the same OS and
+  architecture as the target**: `pnpm fetch` only retrieves the current
+  platform's binaries.
+- **Never copy `node_modules` between machines.** This lockfile contains 51
+  platform-gated packages (`@esbuild/*`, `@rollup/*`). A macOS tree will not run
+  on Windows or Linux.
+
+`.github/workflows` transfers but Bitbucket Server ignores it. Local
+`pnpm check` is the verification of record there until an equivalent Bamboo plan
+exists.
 
 ## What next
 
