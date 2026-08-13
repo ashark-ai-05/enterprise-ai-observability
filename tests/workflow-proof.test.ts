@@ -462,7 +462,12 @@ describe("generic workflow lineage proof", () => {
     } finally {
       await database.close();
     }
-  });
+    // Spinning up PGlite and running every migration takes ~1.5s on an idle
+    // machine, which leaves almost no headroom under vitest's 5s default. On a
+    // loaded runner it intermittently exceeded it and failed at ~5098ms — a
+    // timeout that reads like a broken migration. The work is genuinely slow;
+    // the deadline was the wrong part.
+  }, 30_000);
 });
 
 function deterministicLink(
