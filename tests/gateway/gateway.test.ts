@@ -141,6 +141,35 @@ describe("handleGatewayRequest", () => {
     expect(started.idempotencyKey).not.toBe(terminal.idempotencyKey);
   });
 
+  // The suite's other clocks are frozen, which cannot distinguish "the two
+  // observations carry the same instant because time did not move" from
+  // "because the second one copied the first". This clock moves, so it can.
+  it("observes the terminal event when the call ended, not when it began", async () => {
+    const sink = new InMemoryEventSink();
+    const deps = buildDeps(sink);
+    let tick = 0;
+    const advancingClock = () =>
+      new Date(Date.parse("2026-08-12T00:00:00.000Z") + tick++ * 100);
+
+    await handleGatewayRequest(
+      { ...deps, now: advancingClock },
+      {
+        provider: "internal-maas",
+        path: "/v1/chat",
+        method: "POST",
+        headers: { authorization: "Bearer good-key" },
+        body: JSON.stringify({ model: "gpt-x" }),
+      },
+    );
+
+    const [started, terminal] = sink.events;
+    // Duration derived from the pair is what any generic (non-gateway)
+    // producer will have to use; an equal pair silently reports 0ms.
+    expect(Date.parse(terminal!.timing.observedAt)).toBeGreaterThan(
+      Date.parse(started!.timing.observedAt),
+    );
+  });
+
   it("carries caller-supplied run/trace/span ids through to the event", async () => {
     const sink = new InMemoryEventSink();
     await handleGatewayRequest(buildDeps(sink), {

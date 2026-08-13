@@ -166,6 +166,12 @@ export async function handleGatewayRequest(
     },
   );
 
+  // The terminal event observes when the upstream call *ended*. Reusing the
+  // request-arrival `observedAt` here would make every completed call report a
+  // zero duration to any consumer that derives one from the started/terminal
+  // pair — the only derivation available to producers without the gateway's
+  // `http.latency_ms` attribute.
+  const completedAt = now();
   const modelName = requestedModel ?? extractModel(result.bodyText);
   const usage = extractUsage(result.body);
   const costUsd =
@@ -176,7 +182,7 @@ export async function handleGatewayRequest(
   const terminalPersisted = await emit(deps, {
     sourceEventId,
     now,
-    observedAt,
+    observedAt: completedAt,
     trace,
     tenantId: principal.tenant,
     principal,
